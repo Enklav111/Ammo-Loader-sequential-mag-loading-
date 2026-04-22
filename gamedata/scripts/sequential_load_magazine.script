@@ -1,0 +1,644 @@
+----------------------------------------------------------------
+-- Sequential (alternating) magazine loading.
+-- Adds a context-menu entry on magazines (in the player's own
+-- inventory only) that loads rounds in a user-defined repeating
+-- pattern, e.g. type1 (xN), type2 (xM), type3 (xK), ... then wraps
+-- around until the magazine is full or ammo runs out.
+--
+-- Two loading modes, controlled by the MCM "instant_load" toggle:
+--   * instant  - entire magazine is filled in one frame
+--   * gradual  - one round per tick, with the vanilla Mags Redux
+--                delay and "ammo_load" sound (default)
+--
+-- An optional "ignore_bad_ammo" toggle (default ON) hides ammo
+-- with "_bad" / "_verybad" suffix from the UI and from the load
+-- algorithm entirely.
+--
+-- Integrates with Anomaly Magazines Redux via its public API
+-- (magazine_binder, magazines) - no monkey-patching.
+----------------------------------------------------------------
+
+-- Presets are persisted per save via save_state/load_state.
+-- Shape:
+--   presets[caliber] = { {ammo = "ammo_5.45x39_fmj", count = 3}, ... }
+local presets = {}
+
+--------------------------------------------------------------------
+-- Preset storage ---------------------------------------------------
+--------------------------------------------------------------------
+
+function get_presets()
+	return presets
+end
+
+function get_preset(caliber)
+	return presets[caliber]
+end
+
+function has_preset(caliber)
+	return presets[caliber] ~= nil and #presets[caliber] > 0
+end
+
+function save_preset(caliber, preset)
+	if not caliber then return end
+	if preset and #preset > 0 then
+		presets[caliber] = preset
+	else
+		presets[caliber] = nil
+	end
+end
+
+function reset_preset(caliber)
+	if not caliber then return end
+	presets[caliber] = nil
+end
+
+local function save_state(mdata)
+	mdata.seqload_presets = presets
+end
+
+local function load_state(mdata)
+	presets = mdata.seqload_presets or {}
+end
+
+--------------------------------------------------------------------
+-- Caliber / ammo discovery ----------------------------------------
+--------------------------------------------------------------------
+
+-- Caliber aliases: merge technically-separate ammo groups into a single
+-- caliber bucket. Keys are the RAW caliber token as it appears in the
+-- ammo section name, values are the canonical caliber the token maps to.
+--
+-- Current entries:
+--   12x76 -> 12x70   : 12-gauge magnum shells share the same magazines
+--                       as standard 12x70 shells (zhekan, bull, dart are
+--                       typically interchangeable with buckshot).
+--   pkm   -> 7.62x54 : PKM/PKP belt boxes (ammo_pkm_100) use the same
+--                       cartridge as SVD rifles and some mod weapons can
+--                       accept both in the same magazine.
+--
+-- To merge a new caliber in the future, just add a single line here.
+local CALIBER_ALIASES = {
+	["12x76"] = "12x70",
+	["pkm"]   = "7.62x54",
+}
+
+-- Raw caliber tokens in this set are NOT included in the default
+-- alphabetical preset built for a magazine, even if the magazine
+-- technically accepts them. The user can still add them manually
+-- from the "Add ammo type" dropdown in the UI.
+--
+-- Rationale for "pkm":
+--   For a hypothetical weapon that accepts both loose 7.62x54 rounds
+--   and full PKM belts, the default behaviour should be "load loose
+--   rounds alternately" - belts are opt-in. Defaults for plain SVD or
+--   plain PKP stay correct either way, because their magazines simply
+--   don't accept the other side.
+local HIDDEN_FROM_DEFAULT = {
+	["pkm"] = true,
+}
+
+-- Extract caliber token without applying aliases.
+-- Examples: ammo_5.45x39_fmj -> 5.45x39 ; ammo_12x70_buck -> 12x70 ;
+-- ammo_gauss -> gauss ; ammo_pkm_100 -> pkm
+local function extract_caliber_raw(ammo_section)
+	if not ammo_section then return nil end
+	local c = ammo_section:match("^ammo_(.-)_")
+	if c and c ~= "" then return c end
+	return ammo_section:match("^ammo_(.+)$")
+end
+
+-- Extract caliber token WITH alias applied. This is the caliber used
+-- for UI grouping and preset storage keys.
+function extract_caliber(ammo_section)
+	local raw = extract_caliber_raw(ammo_section)
+	if raw and CALIBER_ALIASES[raw] then
+		return CALIBER_ALIASES[raw]
+	end
+	return raw
+end
+
+-- "Damaged" ammo in GAMMA is marked by a suffix on the section name.
+function is_bad_ammo(sec)
+	if not sec then return false end
+	return sec:match("_bad$") ~= nil or sec:match("_verybad$") ~= nil
+end
+
+local function ignore_bad_enabled()
+	return sequential_load_magazine_mcm and sequential_load_magazine_mcm.IGNORE_BAD
+end
+
+local function instant_enabled()
+	return sequential_load_magazine_mcm and sequential_load_magazine_mcm.INSTANT_LOAD
+end
+
+local caliber_cache = nil     -- sorted array of caliber strings
+local ammo_by_caliber = nil   -- {caliber = sorted array of ammo sections}
+
+local function build_caliber_index()
+	if caliber_cache then return end
+
+	local all_ammo = GetItemList("ammo") or {}
+	local tmp = {}
+
+	for sec, _ in pairs(all_ammo) do
+		local cal = extract_caliber(sec)
+		-- Only include ammo types that have at least one compatible magazine.
+		-- This filters out shell ammos without mag support etc.
+		if cal and magazine_binder and magazine_binder.get_basetypes_by_ammo_type
+			and magazine_binder.get_basetypes_by_ammo_type(sec)
+		then
+			tmp[cal] = tmp[cal] or {}
+			table.insert(tmp[cal], sec)
+		end
+	end
+
+	caliber_cache = {}
+	ammo_by_caliber = {}
+	for cal, ammos in pairs(tmp) do
+		table.sort(ammos)
+		ammo_by_caliber[cal] = ammos
+		table.insert(caliber_cache, cal)
+	end
+	table.sort(caliber_cache)
+end
+
+local function filter_bad(list)
+	if not ignore_bad_enabled() then return list end
+	local out = {}
+	for _, sec in ipairs(list) do
+		if not is_bad_ammo(sec) then
+			table.insert(out, sec)
+		end
+	end
+	return out
+end
+
+function get_all_calibers()
+	build_caliber_index()
+	-- A caliber stays in the list even if all its variants are "bad":
+	-- the player might want to edit preset, and would otherwise have
+	-- to toggle the MCM flag off just to see the caliber exists.
+	return caliber_cache or {}
+end
+
+function get_ammos_for_caliber(caliber)
+	build_caliber_index()
+	local list = (ammo_by_caliber and ammo_by_caliber[caliber]) or {}
+	return filter_bad(list)
+end
+
+-- Return caliber token for a given magazine object (or nil).
+function get_mag_caliber(mag)
+	if not (magazine_binder and magazine_binder.is_magazine and magazine_binder.is_magazine(mag)) then
+		return nil
+	end
+	local compat = magazine_binder.get_magazine_caliber(mag)
+	if not compat or #compat == 0 then return nil end
+	return extract_caliber(compat[1])
+end
+
+--------------------------------------------------------------------
+-- Loading algorithm ------------------------------------------------
+--------------------------------------------------------------------
+
+-- Collect player-inventory ammo pools for requested ammo types.
+-- Returns { ammo_section = { total = N, boxes = { obj, ... } } }.
+local function collect_ammo_inventory(ammo_types)
+	local result = {}
+	for _, ammo in ipairs(ammo_types) do
+		result[ammo] = {total = 0, boxes = {}}
+	end
+	db.actor:iterate_inventory(function(owner, item)
+		local sec = item:section()
+		local pool = result[sec]
+		if pool then
+			table.insert(pool.boxes, item)
+			pool.total = pool.total + item:ammo_get_count()
+		end
+	end)
+	return result
+end
+
+-- Take one round from a pool. Returns true if a round was taken.
+local function take_one_round(pool)
+	while #pool.boxes > 0 do
+		local box = pool.boxes[1]
+		local count = box:ammo_get_count()
+		if count > 1 then
+			box:ammo_set_count(count - 1)
+			pool.total = pool.total - 1
+			return true
+		elseif count == 1 then
+			alife_release_id(box:id())
+			table.remove(pool.boxes, 1)
+			pool.total = pool.total - 1
+			return true
+		else
+			table.remove(pool.boxes, 1)
+		end
+	end
+	return false
+end
+
+-- Build default preset from all ammo types the magazine accepts, alphabetical, 1 each.
+-- Applies "ignore bad" filter if enabled. Skips ammo whose raw caliber
+-- token is in HIDDEN_FROM_DEFAULT (e.g. pkm belts): those require
+-- manual opt-in from the UI.
+local function build_default_preset(mag)
+	local compat = magazine_binder.get_magazine_caliber(mag) or {}
+	local sorted = {}
+	for _, ammo in ipairs(compat) do
+		local raw_cal = extract_caliber_raw(ammo)
+		local skip = (ignore_bad_enabled() and is_bad_ammo(ammo))
+		           or (raw_cal and HIDDEN_FROM_DEFAULT[raw_cal])
+		if not skip then
+			table.insert(sorted, ammo)
+		end
+	end
+	table.sort(sorted)
+	local preset = {}
+	for _, ammo in ipairs(sorted) do
+		table.insert(preset, {ammo = ammo, count = 1})
+	end
+	return preset
+end
+
+-- Keep only preset entries whose ammo is actually accepted by this magazine
+-- and (optionally) not marked as bad ammo.
+local function filter_preset_for_mag(preset, mag)
+	local compat_set = {}
+	for _, ammo in ipairs(magazine_binder.get_magazine_caliber(mag) or {}) do
+		compat_set[ammo] = true
+	end
+	local filtered = {}
+	for _, e in ipairs(preset or {}) do
+		local ok = e.ammo and compat_set[e.ammo] and (e.count or 1) > 0
+		if ok and ignore_bad_enabled() and is_bad_ammo(e.ammo) then
+			ok = false
+		end
+		if ok then
+			table.insert(filtered, {ammo = e.ammo, count = e.count or 1})
+		end
+	end
+	return filtered
+end
+
+-- Expand preset into a flat cycle: [{A,3},{B,1}] -> {A,A,A,B}
+local function expand_cycle(preset)
+	local cycle = {}
+	for _, e in ipairs(preset) do
+		for _ = 1, (e.count or 1) do
+			table.insert(cycle, e.ammo)
+		end
+	end
+	return cycle
+end
+
+--------------------------------------------------------------------
+-- Instant loading --------------------------------------------------
+--------------------------------------------------------------------
+
+local function perform_instant_load(mag, preset, mag_data, free)
+	local types = {}
+	for _, e in ipairs(preset) do
+		table.insert(types, e.ammo)
+	end
+	local inv = collect_ammo_inventory(types)
+
+	local any_ammo = false
+	for _, pool in pairs(inv) do
+		if pool.total > 0 then any_ammo = true break end
+	end
+	if not any_ammo then
+		news_manager.send_tip(db.actor, game.translate_string("st_seqload_no_ammo"),
+			nil, "swiss_knife", 4000)
+		return
+	end
+
+	local cycle = expand_cycle(preset)
+	local cycle_len = #cycle
+	if cycle_len == 0 then return end
+
+	local loaded = 0
+	local cycle_pos = 1
+	for _ = 1, free do
+		local round_taken = false
+		for _ = 1, cycle_len do
+			local ammo = cycle[cycle_pos]
+			local pool = inv[ammo]
+			if pool and pool.total > 0 and take_one_round(pool) then
+				stack.push(mag_data.loaded, ammo)
+				loaded = loaded + 1
+				cycle_pos = (cycle_pos % cycle_len) + 1
+				round_taken = true
+				break
+			end
+			cycle_pos = (cycle_pos % cycle_len) + 1
+		end
+		if not round_taken then break end
+	end
+
+	if loaded > 0 then
+		magazine_binder.set_data(mag:id(), mag_data)
+		if xr_sound and xr_sound.set_sound_play then
+			xr_sound.set_sound_play(AC_ID, "reload_shell")
+		end
+		if magazines and magazines.timed_refresh then
+			magazines.timed_refresh()
+		end
+		news_manager.send_tip(db.actor,
+			string.format(game.translate_string("st_seqload_loaded"), loaded),
+			nil, "swiss_knife", 4000)
+	end
+end
+
+--------------------------------------------------------------------
+-- Gradual loading (one round per tick with delay) ------------------
+--------------------------------------------------------------------
+
+local NS = "seqload"
+-- Active gradual loads, keyed by mag id.
+-- Shape: { cycle, cycle_pos, inv, mag_id, max_size, delay_ms,
+--          last_tick, loaded, inventory_closed, ev_name }
+local in_progress = {}
+
+local function finalize(mag_id, reason)
+	local state = in_progress[mag_id]
+	in_progress[mag_id] = nil
+	-- Release Mags Redux action state only if we set it. Using the public
+	-- "interrupt" helper is safe even if state was reset by something else.
+	if magazines and magazines.do_interrupt_magload then
+		magazines.do_interrupt_magload()
+	end
+	if magazines and magazines.timed_refresh then
+		magazines.timed_refresh()
+	end
+	if not state then return end
+	if reason == "done" or reason == "exhausted" then
+		if state.loaded > 0 then
+			news_manager.send_tip(db.actor,
+				string.format(game.translate_string("st_seqload_loaded"), state.loaded),
+				nil, "swiss_knife", 4000)
+		elseif reason == "exhausted" then
+			news_manager.send_tip(db.actor, game.translate_string("st_seqload_no_ammo"),
+				nil, "swiss_knife", 4000)
+		end
+	elseif reason == "cancelled" then
+		if state.loaded > 0 then
+			news_manager.send_tip(db.actor,
+				string.format(game.translate_string("st_seqload_loaded"), state.loaded),
+				nil, "swiss_knife", 4000)
+		else
+			news_manager.send_tip(db.actor, game.translate_string("st_seqload_interrupted"),
+				nil, "swiss_knife", 3000)
+		end
+	end
+end
+
+local function gradual_tick(mag_id)
+	local state = in_progress[mag_id]
+	if not state then return true end
+
+	-- Cancellation 1: inventory closed.
+	if state.inventory_closed then
+		finalize(mag_id, "cancelled")
+		return true
+	end
+
+	-- Cancellation 2: mag no longer in player inventory (sold / dropped / given away).
+	local mag = level.object_by_id(mag_id)
+	if not mag then
+		finalize(mag_id, "cancelled")
+		return true
+	end
+	local parent = mag:parent()
+	if not parent or parent:id() ~= AC_ID then
+		finalize(mag_id, "cancelled")
+		return true
+	end
+
+	-- Cancellation 3: external action state change (user dragged ammo, etc).
+	-- Mags Redux resets action_state to NONE when it detects a conflict, so
+	-- any state other than ACTION_LOAD_MAG means we were interrupted.
+	if magazines and magazines.action_in_progress and not magazines.action_in_progress() then
+		finalize(mag_id, "cancelled")
+		return true
+	end
+
+	-- Full: done.
+	local mag_data = magazine_binder.get_data(mag_id)
+	if not mag_data then
+		finalize(mag_id, "cancelled")
+		return true
+	end
+	if #mag_data.loaded >= state.max_size then
+		finalize(mag_id, "done")
+		return true
+	end
+
+	-- Rate limit: only act every delay_ms.
+	local tg = time_global()
+	if tg < state.last_tick + state.delay_ms then return false end
+	state.last_tick = tg
+
+	-- Walk the cycle looking for an ammo type that still has rounds.
+	local cycle = state.cycle
+	local cycle_len = #cycle
+	local attempts = 0
+	while attempts < cycle_len do
+		local ammo = cycle[state.cycle_pos]
+		local pool = state.inv[ammo]
+		if pool and pool.total > 0 and take_one_round(pool) then
+			stack.push(mag_data.loaded, ammo)
+			magazine_binder.set_data(mag_id, mag_data)
+			state.loaded = state.loaded + 1
+			state.cycle_pos = (state.cycle_pos % cycle_len) + 1
+			if utils_obj and utils_obj.play_sound then
+				utils_obj.play_sound("magazines\\ammo_load" .. math.random(1, 7))
+			end
+			-- Direct inventory_refresh (not timed_refresh), because timed_refresh
+			-- debounces with 0.5s and keeps getting postponed by our own ticks,
+			-- so the magazine counter "X/Y" never updates until loading ends.
+			-- Mags Redux's own per-round loader uses inventory_refresh(2) for the
+			-- same reason.
+			if magazines and magazines.inventory_refresh then
+				magazines.inventory_refresh(2)
+			end
+			return false
+		end
+		state.cycle_pos = (state.cycle_pos % cycle_len) + 1
+		attempts = attempts + 1
+	end
+
+	-- No ammo type has rounds left.
+	finalize(mag_id, "exhausted")
+	return true
+end
+
+local function perform_gradual_load(mag, preset, mag_data, free)
+	local mag_id = mag:id()
+
+	-- Don't double-schedule.
+	if in_progress[mag_id] then return end
+
+	local types = {}
+	for _, e in ipairs(preset) do
+		table.insert(types, e.ammo)
+	end
+	local inv = collect_ammo_inventory(types)
+
+	local any_ammo = false
+	for _, pool in pairs(inv) do
+		if pool.total > 0 then any_ammo = true break end
+	end
+	if not any_ammo then
+		news_manager.send_tip(db.actor, game.translate_string("st_seqload_no_ammo"),
+			nil, "swiss_knife", 4000)
+		return
+	end
+
+	local cycle = expand_cycle(preset)
+	if #cycle == 0 then return end
+
+	-- Resolve per-round delay from Mags Redux MCM.
+	local delay_s = 0.4
+	if magazines and magazines.get_mag_time then
+		delay_s = magazines.get_mag_time(mag:section(), false) or 0.4
+	end
+
+	local max_size = SYS_GetParam(2, mag:section(), "max_mag_size") or 0
+
+	in_progress[mag_id] = {
+		cycle             = cycle,
+		cycle_pos         = 1,
+		inv               = inv,
+		mag_id            = mag_id,
+		max_size          = max_size,
+		delay_ms          = (delay_s or 0.4) * 1000,
+		last_tick         = 0,
+		loaded            = 0,
+		inventory_closed  = false,
+	}
+
+	-- Claim Mags Redux action slot so drag-drop loads get rejected
+	-- (and, importantly, so we can detect the drag as an interrupt).
+	if magazines and magazines.action_start_magload then
+		magazines.action_start_magload()
+	end
+
+	local ev_name = "seqload_" .. mag_id
+	RemoveTimeEvent(NS, ev_name)
+	CreateTimeEvent(NS, ev_name, 0.1, function()
+		return gradual_tick(mag_id)
+	end)
+end
+
+--------------------------------------------------------------------
+-- Main entry point -------------------------------------------------
+--------------------------------------------------------------------
+
+function perform_sequential_load(mag)
+	if not (magazine_binder and magazine_binder.is_magazine and magazine_binder.is_magazine(mag)) then
+		return
+	end
+
+	-- Sanity: gradual load only makes sense for mags in the actor's inventory.
+	-- (Context-menu gating already restricts to actor_bag/equ/belt, this is
+	-- just a defence-in-depth check.)
+	local parent = mag:parent()
+	if not parent or parent:id() ~= AC_ID then return end
+
+	local mag_id = mag:id()
+
+	-- If a gradual load is already running on this mag, ignore further clicks.
+	if in_progress[mag_id] then return end
+
+	local mag_data = magazine_binder.get_data(mag_id)
+	if not mag_data then return end
+
+	local max_size = SYS_GetParam(2, mag:section(), "max_mag_size") or 0
+	local free = max_size - #mag_data.loaded
+	if free <= 0 then
+		news_manager.send_tip(db.actor, game.translate_string("st_seqload_mag_full"),
+			nil, "swiss_knife", 4000)
+		return
+	end
+
+	-- Resolve preset.
+	local caliber = get_mag_caliber(mag)
+	local preset = filter_preset_for_mag(caliber and presets[caliber], mag)
+	if #preset == 0 then
+		preset = build_default_preset(mag)
+	end
+	if #preset == 0 then return end
+
+	if instant_enabled() then
+		perform_instant_load(mag, preset, mag_data, free)
+	else
+		perform_gradual_load(mag, preset, mag_data, free)
+	end
+end
+
+--------------------------------------------------------------------
+-- Interrupt hook: inventory close ---------------------------------
+--------------------------------------------------------------------
+
+local function on_gui_hide(name, path)
+	if name ~= "UIInventory" then return end
+	-- Flag all active gradual loads; actual cleanup happens on next tick.
+	for _, state in pairs(in_progress) do
+		state.inventory_closed = true
+	end
+end
+
+--------------------------------------------------------------------
+-- Magazine context-menu functor ------------------------------------
+--------------------------------------------------------------------
+
+local MENU_MODES = {inventory = true, loot = true}
+local MENU_BAGS  = {actor_bag = true, actor_equ = true, actor_belt = true}
+
+local function menu_check(obj, bag, mode)
+	if not magazine_binder then return false end
+	if not (MENU_MODES[mode] and MENU_BAGS[bag]) then return false end
+	if not magazine_binder.is_magazine(obj) then return false end
+	local parent = obj:parent()
+	if not parent or parent:id() ~= AC_ID then return false end
+	local mag_data = magazine_binder.get_data(obj:id())
+	if not mag_data then return false end
+	local max_size = SYS_GetParam(2, obj:section(), "max_mag_size") or 0
+	if #mag_data.loaded >= max_size then return false end
+	-- Don't show a second time if we're already loading this mag.
+	if in_progress[obj:id()] then return false end
+	return true
+end
+
+local function menu_str(obj, bag, mode)
+	return "st_seqload_menu"
+end
+
+local function menu_action(obj, bag, mode)
+	perform_sequential_load(obj)
+end
+
+--------------------------------------------------------------------
+-- Lifecycle --------------------------------------------------------
+--------------------------------------------------------------------
+
+function on_game_start()
+	if not magazine_binder then
+		printf("Sequential Load: Anomaly Magazines Redux not found, mod disabled")
+		return
+	end
+	if not (custom_functor_autoinject and custom_functor_autoinject.add_functor) then
+		printf("Sequential Load: custom_functor_autoinject not found, menu entry disabled")
+	else
+		custom_functor_autoinject.add_functor("seqload_magazine",
+			menu_check, menu_str, nil, menu_action, true)
+	end
+
+	RegisterScriptCallback("save_state",  save_state)
+	RegisterScriptCallback("load_state",  load_state)
+	RegisterScriptCallback("GUI_on_hide", on_gui_hide)
+end

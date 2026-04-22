@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="windows-1251"?>
+
+<string_table>
+
+	<!-- Context menu -->
+
+	<string id="st_seqload_menu">
+		<text>load sequentially</text>
+	</string>
+
+	<!-- Overlay UI -->
+
+	<string id="st_seqload_title">
+		<text>Ammo Loader - sequential magazine loading</text>
+	</string>
+
+	<string id="st_seqload_caliber">
+		<text>Caliber:</text>
+	</string>
+
+	<string id="st_seqload_preset">
+		<text>Alternation Preset</text>
+	</string>
+
+	<string id="st_seqload_add">
+		<text>Add ammo type</text>
+	</string>
+
+	<string id="st_seqload_save">
+		<text>Save</text>
+	</string>
+
+	<string id="st_seqload_reset">
+		<text>Reset</text>
+	</string>
+
+	<string id="st_seqload_close">
+		<text>Close</text>
+	</string>
+
+	<string id="st_seqload_saved">
+		<text>Preset saved</text>
+	</string>
+
+	<string id="st_seqload_reset_done">
+		<text>Preset reset</text>
+	</string>
+
+	<string id="st_seqload_empty">
+		<text>No calibers found</text>
+	</string>
+
+	<string id="st_seqload_no_ammo">
+		<text>No compatible ammo in inventory</text>
+	</string>
+
+	<string id="st_seqload_loaded">
+		<text>Loaded rounds: %s</text>
+	</string>
+
+	<string id="st_seqload_mag_full">
+		<text>Magazine is already full</text>
+	</string>
+
+	<string id="st_seqload_default_preset">
+		<text>(default, alphabetical order)</text>
+	</string>
+
+	<string id="st_seqload_interrupted">
+		<text>Loading interrupted</text>
+	</string>
+
+	<!-- MCM -->
+
+	<string id="ui_mcm_menu_seqload">
+		<text>Ammo Loader</text>
+	</string>
+
+	<string id="ui_mcm_seqload">
+		<text>Ammo Loader (sequential load)</text>
+	</string>
+
+	<string id="ui_mcm_seqload_title">
+		<text>Ammo Loader (sequential load)</text>
+	</string>
+
+	<string id="ui_mcm_seqload_key_toggle">
+		<text>Menu open key</text>
+	</string>
+
+	<string id="ui_mcm_seqload_key_toggle_desc">
+		<text>Hotkey for opening the sequential load preset configuration window</text>
+	</string>
+
+	<string id="ui_mcm_seqload_instant_load">
+		<text>Instant loading</text>
+	</string>
+
+	<string id="ui_mcm_seqload_instant_load_desc">
+		<text>If enabled - the whole magazine is loaded instantly. If disabled - rounds are loaded one by one with delay and sound, matching vanilla Anomaly Magazines Redux behavior. Disabled by default.</text>
+	</string>
+
+	<string id="ui_mcm_seqload_ignore_bad_ammo">
+		<text>Ignore damaged ammo</text>
+	</string>
+
+	<string id="ui_mcm_seqload_ignore_bad_ammo_desc">
+		<text>If enabled - ammo with _bad and _verybad suffix (damaged) is hidden from the preset configuration menu and is not loaded into magazines. Enabled by default.</text>
+	</string>
+
+</string_table>

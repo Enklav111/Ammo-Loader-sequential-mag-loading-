@@ -1,0 +1,107 @@
+----------------------------------------------------------------
+-- Sequential Load - MCM settings + hotkey handler.
+-- Exposes:
+--   KEY_TOGGLE    - DIK code for opening the overlay (default DIK_U)
+--   INSTANT_LOAD  - if true, load the whole magazine at once;
+--                   if false, load one round at a time with delay
+--                   (default: false, matches vanilla Mags Redux)
+--   IGNORE_BAD    - if true, _bad / _verybad ammo is hidden from
+--                   the UI and skipped by the loading algorithm
+--                   (default: true)
+----------------------------------------------------------------
+
+KEY_TOGGLE   = DIK_keys.DIK_U
+INSTANT_LOAD = false
+IGNORE_BAD   = true
+
+local function get_mcm_value(path, default)
+	if ui_mcm and ui_mcm.get then
+		local v = ui_mcm.get(path)
+		if v ~= nil then return v end
+	end
+	return default
+end
+
+function on_mcm_load()
+	return {
+		id = "seqload",
+		sh = true,
+		gr = {
+			{
+				id = "title",
+				type = "slide",
+				link = "ui_options_slider_player",
+				text = "ui_mcm_seqload_title",
+				size = {512, 50},
+				spacing = 20,
+			},
+			-- MCM auto-derives label/desc keys from (<group_id>_<opt_id>),
+			-- looking up "ui_mcm_<hint>" and "ui_mcm_<hint>_desc". With our
+			-- outer id "seqload", the keys become e.g. "ui_mcm_seqload_key_toggle"
+			-- and "ui_mcm_seqload_key_toggle_desc", which match our XML strings.
+			-- So we must NOT pass explicit hint= here - doing so would add a
+			-- second "ui_mcm_" prefix (MCM bug-by-design).
+			{
+				id = "key_toggle",
+				type = "key_bind",
+				val = 2,
+				def = DIK_keys.DIK_U,
+			},
+			{
+				id = "instant_load",
+				type = "check",
+				val = 1,
+				def = false,
+			},
+			{
+				id = "ignore_bad_ammo",
+				type = "check",
+				val = 1,
+				def = true,
+			},
+		},
+	}
+end
+
+local function load_settings()
+	KEY_TOGGLE   = get_mcm_value("seqload/key_toggle",      DIK_keys.DIK_U)
+	INSTANT_LOAD = get_mcm_value("seqload/instant_load",    false)
+	IGNORE_BAD   = get_mcm_value("seqload/ignore_bad_ammo", true)
+end
+
+function on_option_change()
+	load_settings()
+end
+
+--------------------------------------------------------------------
+-- Hotkey handler
+--------------------------------------------------------------------
+
+local function any_gui_open()
+	if not _GUIs then return false end
+	for name, _ in pairs(_GUIs) do
+		if name ~= "UISequentialLoad" then
+			return true
+		end
+	end
+	return false
+end
+
+local function on_key_press(key)
+	if key ~= KEY_TOGGLE then return end
+	if not db.actor then return end
+	if any_gui_open() then return end
+	if sequential_load_magazine_ui and sequential_load_magazine_ui.toggle then
+		sequential_load_magazine_ui.toggle()
+	end
+end
+
+--------------------------------------------------------------------
+-- Lifecycle
+--------------------------------------------------------------------
+
+function on_game_start()
+	RegisterScriptCallback("on_option_change",    on_option_change)
+	RegisterScriptCallback("actor_on_first_update", load_settings)
+	RegisterScriptCallback("on_key_press",        on_key_press)
+end

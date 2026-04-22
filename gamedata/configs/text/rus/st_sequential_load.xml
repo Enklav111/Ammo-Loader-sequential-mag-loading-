@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="windows-1251"?>
+
+<string_table>
+
+	<!-- Context menu -->
+
+	<string id="st_seqload_menu">
+		<text>зарядить поочерёдно</text>
+	</string>
+
+	<!-- Overlay UI -->
+
+	<string id="st_seqload_title">
+		<text>Ammo Loader - поочерёдная зарядка магазинов</text>
+	</string>
+
+	<string id="st_seqload_caliber">
+		<text>Калибр:</text>
+	</string>
+
+	<string id="st_seqload_preset">
+		<text>Пресет чередования</text>
+	</string>
+
+	<string id="st_seqload_add">
+		<text>Добавить тип патрона</text>
+	</string>
+
+	<string id="st_seqload_save">
+		<text>Сохранить</text>
+	</string>
+
+	<string id="st_seqload_reset">
+		<text>Сбросить</text>
+	</string>
+
+	<string id="st_seqload_close">
+		<text>Закрыть</text>
+	</string>
+
+	<string id="st_seqload_saved">
+		<text>Пресет сохранён</text>
+	</string>
+
+	<string id="st_seqload_reset_done">
+		<text>Пресет сброшен</text>
+	</string>
+
+	<string id="st_seqload_empty">
+		<text>Калибры не найдены</text>
+	</string>
+
+	<string id="st_seqload_no_ammo">
+		<text>В инвентаре нет совместимых патронов</text>
+	</string>
+
+	<string id="st_seqload_loaded">
+		<text>Заряжено патронов: %s</text>
+	</string>
+
+	<string id="st_seqload_mag_full">
+		<text>Магазин уже полон</text>
+	</string>
+
+	<string id="st_seqload_default_preset">
+		<text>(по умолчанию, алфавитный порядок)</text>
+	</string>
+
+	<string id="st_seqload_interrupted">
+		<text>Зарядка прервана</text>
+	</string>
+
+	<!-- MCM top-level entry in the mod list -->
+
+	<string id="ui_mcm_menu_seqload">
+		<text>Ammo Loader</text>
+	</string>
+
+	<!-- MCM section title and option labels -->
+
+	<string id="ui_mcm_seqload">
+		<text>Ammo Loader (поочерёдная зарядка)</text>
+	</string>
+
+	<string id="ui_mcm_seqload_title">
+		<text>Ammo Loader (поочерёдная зарядка)</text>
+	</string>
+
+	<string id="ui_mcm_seqload_key_toggle">
+		<text>Клавиша открытия меню</text>
+	</string>
+
+	<string id="ui_mcm_seqload_key_toggle_desc">
+		<text>Клавиша для открытия окна настройки пресетов поочерёдной зарядки</text>
+	</string>
+
+	<string id="ui_mcm_seqload_instant_load">
+		<text>Мгновенная зарядка</text>
+	</string>
+
+	<string id="ui_mcm_seqload_instant_load_desc">
+		<text>Если включено - магазин заряжается целиком сразу. Если выключено - патроны загружаются по одному с задержкой и звуком, как в оригинале Anomaly Magazines Redux. По умолчанию выключено.</text>
+	</string>
+
+	<string id="ui_mcm_seqload_ignore_bad_ammo">
+		<text>Игнорировать испорченные патроны</text>
+	</string>
+
+	<string id="ui_mcm_seqload_ignore_bad_ammo_desc">
+		<text>Если включено - патроны с суффиксом _bad и _verybad (испорченные) не показываются в меню настройки пресета и не заряжаются в магазин. По умолчанию включено.</text>
+	</string>
+
+</string_table>
