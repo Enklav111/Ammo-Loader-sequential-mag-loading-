@@ -2,13 +2,9 @@
 
 <string_table>
 
-	<!-- Context menu -->
-
 	<string id="st_seqload_menu">
 		<text>зарядить поочерёдно</text>
 	</string>
-
-	<!-- Overlay UI -->
 
 	<string id="st_seqload_title">
 		<text>Ammo Loader - поочерёдная зарядка магазинов</text>
@@ -70,13 +66,9 @@
 		<text>Зарядка прервана</text>
 	</string>
 
-	<!-- MCM top-level entry in the mod list -->
-
 	<string id="ui_mcm_menu_seqload">
 		<text>Ammo Loader</text>
 	</string>
-
-	<!-- MCM section title and option labels -->
 
 	<string id="ui_mcm_seqload">
 		<text>Ammo Loader (поочерёдная зарядка)</text>
@@ -87,11 +79,71 @@
 	</string>
 
 	<string id="ui_mcm_seqload_key_toggle">
-		<text>Клавиша открытия меню</text>
+		<text>Клавиша пресетов / зарядки под курсором</text>
 	</string>
 
 	<string id="ui_mcm_seqload_key_toggle_desc">
-		<text>Клавиша для открытия окна настройки пресетов поочерёдной зарядки</text>
+		<text>Вне интерфейсов - открывает окно настройки пресетов поочерёдной зарядки. Если инвентарь открыт и курсор наведён на магазин - запускает поочерёдную зарядку этого магазина.</text>
+	</string>
+
+	<string id="ui_mcm_seqload_debug_header">
+		<text>Отладка</text>
+	</string>
+
+	<string id="ui_mcm_seqload_debug">
+		<text>Отладка (дамп порядка патронов)</text>
+	</string>
+
+	<string id="ui_mcm_seqload_debug_desc">
+		<text>Если включено, работают клавиша дампа в инвентаре (магазин под курсором) и вне инвентаря (магазин в оружии в руках) согласно модификатору ниже. Если выключено, клавиша дампа не обрабатывается. Клавиша U и поочерёдная зарядка - без изменений.</text>
+	</string>
+
+	<string id="ui_mcm_seqload_key_dump">
+		<text>Клавиша дампа (отладка)</text>
+	</string>
+
+	<string id="ui_mcm_seqload_key_dump_desc">
+		<text>Работает только при включенной отладке. В инвентаре - порядок патронов в магазине под курсором. Вне инвентаря - порядок в магазине внутри оружия в руках, см. модификатор. По умолчанию - средняя кнопка мыши. MCM не даст перебинд на mouse1/2/3, клавиатура и mouse4+ разрешены.</text>
+	</string>
+
+	<string id="ui_mcm_seqload_dump_weapon_modifier">
+		<text>Оружие в руках: модификатор (отладка)</text>
+	</string>
+
+	<string id="ui_mcm_seqload_dump_weapon_modifier_desc">
+		<text>При закрытом инвентаре: какая клавиша зажимается вместе с клавишей дампа. Без модификатора - одна клавиша дампа. По умолчанию - Shift.</text>
+	</string>
+
+	<string id="st_seqload_dump_empty">
+		<text>Магазин пуст</text>
+	</string>
+
+	<string id="st_seqload_dump_round">
+		<text>%s - %dx</text>
+	</string>
+
+	<string id="st_seqload_dump_more">
+		<text>...</text>
+	</string>
+
+	<string id="st_seqload_dump_no_mag">
+		<text>Магазин не установлен</text>
+	</string>
+
+	<string id="seqload_dump_weapon_modifier_lst_seqload_mod_none">
+		<text>Без модификатора (только клавиша дампа)</text>
+	</string>
+
+	<string id="seqload_dump_weapon_modifier_lst_seqload_mod_shift">
+		<text>Клавиша Shift</text>
+	</string>
+
+	<string id="seqload_dump_weapon_modifier_lst_seqload_mod_ctrl">
+		<text>Клавиша Ctrl</text>
+	</string>
+
+	<string id="seqload_dump_weapon_modifier_lst_seqload_mod_alt">
+		<text>Клавиша Alt</text>
 	</string>
 
 	<string id="ui_mcm_seqload_instant_load">

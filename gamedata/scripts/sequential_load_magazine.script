@@ -581,6 +581,87 @@ function perform_sequential_load(mag)
 end
 
 --------------------------------------------------------------------
+-- Debug dump: show current magazine round order -------------------
+--------------------------------------------------------------------
+
+-- Max number of run-length groups to print before truncating.
+local DUMP_MAX_ROWS = 10
+
+-- Build dump text: one header line plus up to DUMP_MAX_ROWS grouped
+-- ammo lines. Input mag_data.loaded is a LIFO stack (stack.push
+-- appends to the end), so the NEXT round to be fired is the last
+-- element. We walk it from end to start and compress consecutive
+-- identical sections into "<localized name> - Nx" rows.
+--
+-- NB: Anomaly's news_manager renders the literal two-character "\n"
+-- sequence (backslash + 'n') as a line break, NOT the LF control
+-- character. So lines are joined with "\\n" (Lua escape = those
+-- two chars), matching how other GAMMA mods build multi-line tips.
+local DUMP_NEWLINE = "\\n"
+
+local function build_dump_text(header, mag_data)
+	local lines = {header}
+
+	local loaded = mag_data and mag_data.loaded or nil
+	if (not loaded) or #loaded == 0 then
+		table.insert(lines, game.translate_string("st_seqload_dump_empty"))
+		return table.concat(lines, DUMP_NEWLINE)
+	end
+
+	local row_fmt = game.translate_string("st_seqload_dump_round")
+	local groups = 0
+	local i = #loaded
+	while i >= 1 and groups < DUMP_MAX_ROWS do
+		local sec = loaded[i]
+		local count = 0
+		while i >= 1 and loaded[i] == sec do
+			count = count + 1
+			i = i - 1
+		end
+		local name = game.translate_string(ui_item.get_sec_name(sec))
+		table.insert(lines, string.format(row_fmt, name, count))
+		groups = groups + 1
+	end
+
+	-- If we stopped because of the row cap but there are more rounds
+	-- below, append a "..." marker instead of listing them all.
+	if i >= 1 then
+		table.insert(lines, game.translate_string("st_seqload_dump_more"))
+	end
+
+	return table.concat(lines, DUMP_NEWLINE)
+end
+
+-- Public: dump for a magazine under cursor / in inventory.
+function dump_mag_order(mag)
+	if not (magazine_binder and magazine_binder.is_magazine and magazine_binder.is_magazine(mag)) then
+		return
+	end
+	local header = game.translate_string(ui_item.get_sec_name(mag:section()))
+	local mag_data = magazine_binder.get_data(mag:id())
+	local text = build_dump_text(header, mag_data)
+	news_manager.send_tip(db.actor, text, nil, "swiss_knife", 8000)
+end
+
+-- Public: dump for the magazine currently attached to a weapon in hand.
+function dump_weapon_mag(wpn)
+	if not wpn then return end
+	if not (magazine_binder and magazine_binder.is_supported_weapon
+		and magazine_binder.is_supported_weapon(wpn)) then
+		return
+	end
+	local header = game.translate_string(ui_item.get_sec_name(wpn:section()))
+	local mag_data = magazine_binder.get_mag_loaded(wpn:id())
+	if not mag_data then
+		local text = header .. DUMP_NEWLINE .. game.translate_string("st_seqload_dump_no_mag")
+		news_manager.send_tip(db.actor, text, nil, "swiss_knife", 6000)
+		return
+	end
+	local text = build_dump_text(header, mag_data)
+	news_manager.send_tip(db.actor, text, nil, "swiss_knife", 8000)
+end
+
+--------------------------------------------------------------------
 -- Interrupt hook: inventory close ---------------------------------
 --------------------------------------------------------------------
 

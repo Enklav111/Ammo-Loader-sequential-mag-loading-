@@ -1,18 +1,31 @@
 ----------------------------------------------------------------
 -- Sequential Load - MCM settings + hotkey handler.
 -- Exposes:
---   KEY_TOGGLE    - DIK code for opening the overlay (default DIK_U)
---   INSTANT_LOAD  - if true, load the whole magazine at once;
---                   if false, load one round at a time with delay
---                   (default: false, matches vanilla Mags Redux)
---   IGNORE_BAD    - if true, _bad / _verybad ammo is hidden from
---                   the UI and skipped by the loading algorithm
---                   (default: true)
+--   KEY_TOGGLE           - DIK code for the main hotkey (default DIK_U).
+--                          Smart behaviour:
+--                            * inventory open + cursor on magazine
+--                              -> trigger sequential load on that mag
+--                            * no GUI open -> open preset overlay
+--                          Originally the key only opened the overlay.
+--   KEY_DUMP             - DIK code for the debug dump key (MMB=339);
+--                          only used when DEBUG is true.
+--   DUMP_MODIFIER        - 0=none, 1=Shift, 2=Ctrl, 3=Alt. For weapon
+--                          in hand: KEY_DUMP with optional modifier
+--                          (0 = MMB only). Only when DEBUG is true.
+--   DEBUG                - if true, dump keys / inventory dump are active.
+--   INSTANT_LOAD         - if true, load the whole magazine at once;
+--                          if false, load one round at a time with
+--                          delay (default: false).
+--   IGNORE_BAD           - if true, _bad / _verybad ammo is hidden
+--                          from the UI and skipped (default: true).
 ----------------------------------------------------------------
 
-KEY_TOGGLE   = DIK_keys.DIK_U
-INSTANT_LOAD = false
-IGNORE_BAD   = true
+KEY_TOGGLE       = DIK_keys.DIK_U
+KEY_DUMP         = 339         -- mouse3 / MMB
+DUMP_MODIFIER    = 1           -- 0=none, 1=shift, 2=ctrl, 3=alt
+DEBUG            = false
+INSTANT_LOAD     = false
+IGNORE_BAD       = true
 
 local function get_mcm_value(path, default)
 	if ui_mcm and ui_mcm.get then
@@ -59,14 +72,52 @@ function on_mcm_load()
 				val = 1,
 				def = true,
 			},
+			{ id = "seqload_debug_spacer", type = "line" },
+			{
+				id = "header_debug",
+				type = "slide",
+				link = "ui_options_slider_player",
+				text = "ui_mcm_seqload_debug_header",
+				size = {512, 50},
+				spacing = 20,
+			},
+			{
+				id = "debug",
+				type = "check",
+				val = 1,
+				def = false,
+			},
+			{
+				id = "key_dump",
+				type = "key_bind",
+				val = 2,
+				def = 339,
+			},
+			-- Modifier: 0=none. Full keys: seqload_dump_weapon_modifier_lst_seqload_mod_* in XML.
+			{
+				id      = "dump_weapon_modifier",
+				type    = ui_mcm and ui_mcm.kb_mod_radio or "radio_h",
+				val     = 2,
+				def     = 1,
+				content = {
+					{0, "seqload_mod_none"},
+					{1, "seqload_mod_shift"},
+					{2, "seqload_mod_ctrl"},
+					{3, "seqload_mod_alt"},
+				},
+			},
 		},
 	}
 end
 
 local function load_settings()
-	KEY_TOGGLE   = get_mcm_value("seqload/key_toggle",      DIK_keys.DIK_U)
-	INSTANT_LOAD = get_mcm_value("seqload/instant_load",    false)
-	IGNORE_BAD   = get_mcm_value("seqload/ignore_bad_ammo", true)
+	KEY_TOGGLE    = get_mcm_value("seqload/key_toggle",            DIK_keys.DIK_U)
+	KEY_DUMP      = get_mcm_value("seqload/key_dump",              339)
+	DUMP_MODIFIER = get_mcm_value("seqload/dump_weapon_modifier",  1)
+	local dbg     = get_mcm_value("seqload/debug",                 false)
+	DEBUG         = (dbg == true) or (dbg == 1)
+	INSTANT_LOAD  = get_mcm_value("seqload/instant_load",          false)
+	IGNORE_BAD    = get_mcm_value("seqload/ignore_bad_ammo",       true)
 end
 
 function on_option_change()
@@ -74,7 +125,7 @@ function on_option_change()
 end
 
 --------------------------------------------------------------------
--- Hotkey handler
+-- Helpers
 --------------------------------------------------------------------
 
 local function any_gui_open()
@@ -87,12 +138,251 @@ local function any_gui_open()
 	return false
 end
 
-local function on_key_press(key)
-	if key ~= KEY_TOGGLE then return end
-	if not db.actor then return end
+-- Is the player in the regular inventory screen (not loot/trade/etc).
+local function inventory_open()
+	if not (_GUIs and _GUIs["UIInventory"]) then return false end
+	if not (ui_inventory and ui_inventory.GUI) then return false end
+	return ui_inventory.GUI.mode == "inventory"
+end
+
+-- Cached "object under cursor" updated by ActorMenu focus callbacks.
+-- Reading ui_inventory.GUI.hover synchronously from on_key_press proved
+-- unreliable in GAMMA UI (hover.bag is often `false` at press time); the
+-- focus callback is the official channel the game uses to announce what
+-- the cursor is currently over and fires consistently on both cell enter
+-- and leave events, so we mirror it here.
+local hovered_obj = nil
+
+local function on_item_focus_receive(obj)
+	hovered_obj = obj
+end
+
+local function on_item_focus_lost(obj)
+	-- Clear only if we're losing focus on the same obj we cached;
+	-- otherwise we could wipe a fresh focus that already replaced us.
+	if hovered_obj and obj and hovered_obj:id() == obj:id() then
+		hovered_obj = nil
+	elseif not obj then
+		hovered_obj = nil
+	end
+end
+
+-- Object under cursor. First consult the focus cache; fall back to
+-- reading ui_inventory.GUI.hover for defence-in-depth (some GAMMA
+-- UI forks may not fire the focus callback in every mode).
+local function get_hovered_obj()
+	if hovered_obj then return hovered_obj end
+	if not (ui_inventory and ui_inventory.GUI) then return nil end
+	local hover = ui_inventory.GUI.hover
+	if not (hover and hover.bag and hover.idx) then return nil end
+	local cc = ui_inventory.GUI.CC and ui_inventory.GUI.CC[hover.bag]
+	if not cc then return nil end
+	return cc:GetObj(hover.idx)
+end
+
+-- Object under cursor IF it is a magazine in the player's own inventory.
+local function get_hovered_magazine()
+	if not magazine_binder then return nil end
+	local obj = get_hovered_obj()
+	if not obj then return nil end
+	if not magazine_binder.is_magazine(obj) then return nil end
+	local parent = obj:parent()
+	if not (parent and parent:id() == AC_ID) then return nil end
+	return obj
+end
+
+-- Reset the hover cache whenever any GUI closes (inventory closing
+-- won't fire ActorMenu_on_item_focus_lost for whatever was last
+-- hovered, so we can end up with a stale obj pointer).
+local function on_gui_hide(name, path)
+	hovered_obj = nil
+end
+
+-- Is the configured modifier currently held (weapon-hand dump). Value 0 = no requirement.
+local function modifier_matches()
+	local m = DUMP_MODIFIER
+	if m == 0 then
+		return true
+	end
+	if m == 1 then
+		return key_state(DIK_keys.DIK_LSHIFT) == 1 or key_state(DIK_keys.DIK_RSHIFT) == 1
+	elseif m == 2 then
+		return key_state(DIK_keys.DIK_LCONTROL) == 1 or key_state(DIK_keys.DIK_RCONTROL) == 1
+	elseif m == 3 then
+		return key_state(DIK_keys.DIK_LMENU) == 1 or key_state(DIK_keys.DIK_RMENU) == 1
+	end
+	return false
+end
+
+--------------------------------------------------------------------
+-- Inventory: hook UIInventory:OnKeyboard (GAMMA/Anomaly does NOT
+-- send inventory keys to the global on_key_press while the inventory
+-- window has focus). Pattern from Mags_Unload_and_Eject
+-- (z_mags_unload_eject_mcm.script): get_hover() = hover.bag/idx
+-- and CC[bag]:GetObj(idx) when idx is set.
+-- We install our wrapper the first time UIInventory is shown, so
+-- we chain after any other mod (e.g. z_mags) that has already
+-- replaced OnKeyboard at load time.
+--------------------------------------------------------------------
+
+local inv_kb_chain = nil
+
+-- Byte-for-byte logic as Mags_Unload_and_Eject get_hover(); do not
+-- over-validate bag/idx — GAMMA hover state can be idx-only in some cases.
+local function get_hover()
+	if not (ui_inventory and ui_inventory.GUI) then
+		return nil
+	end
+	local bag = ui_inventory.GUI.hover.bag
+	local idx = ui_inventory.GUI.hover.idx
+	if idx then
+		return ui_inventory.GUI.CC[bag]:GetObj(idx)
+	end
+end
+
+-- Magazine under cursor, must belong to the actor (bag/equip/belt).
+local function get_hovered_actor_mag()
+	if not magazine_binder or not magazine_binder.is_magazine then
+		return nil
+	end
+	local obj = get_hover()
+	if not obj then
+		return nil
+	end
+	if not magazine_binder.is_magazine(obj) then
+		return nil
+	end
+	local p = obj:parent()
+	if not p or p:id() ~= AC_ID then
+		return nil
+	end
+	return obj
+end
+
+local function inv_handle_keys(dik)
+	-- same modes as Mags Unload: inventory + loot; add repair
+	-- (GAMMA can open a repair screen that still uses the bag grid).
+	if not (ui_inventory and ui_inventory.GUI) then
+		return
+	end
+	local m = ui_inventory.GUI.mode
+	if m ~= "inventory" and m ~= "loot" and m ~= "repair" then
+		return
+	end
+	local mag = get_hovered_actor_mag()
+	if not mag then
+		return
+	end
+	if dik == KEY_TOGGLE and sequential_load_magazine and sequential_load_magazine.perform_sequential_load then
+		sequential_load_magazine.perform_sequential_load(mag)
+	elseif DEBUG and dik == KEY_DUMP and sequential_load_magazine and sequential_load_magazine.dump_mag_order then
+		sequential_load_magazine.dump_mag_order(mag)
+	end
+end
+
+local function inv_keyboard_hook(self, dik, keyboard_action)
+	local r = inv_kb_chain(self, dik, keyboard_action)
+	-- Mags_Unload_eject and other mods use WINDOW_KEY_PRESSED
+	if not ui_events then
+		return r
+	end
+	if keyboard_action == ui_events.WINDOW_KEY_PRESSED then
+		inv_handle_keys(dik)
+	end
+	return r
+end
+
+local function try_install_inv_keyboard()
+	if not (ui_inventory and ui_inventory.UIInventory) then
+		return
+	end
+	local current = ui_inventory.UIInventory.OnKeyboard
+	-- If we are already the top-level handler, nothing to do.
+	if current == inv_keyboard_hook then
+		return
+	end
+	-- (Re)wrap whatever is current (vanilla, or another mod such as
+	-- Mags_Unload) so the chain is always: seqload -> previous.
+	inv_kb_chain = current
+	ui_inventory.UIInventory.OnKeyboard = inv_keyboard_hook
+end
+
+-- GUI_on_show may pass no args depending on engine build; detect
+-- inventory the same way as grok_drop_item_press_key_mcm.script.
+local function on_gui_show()
+	if _GUIs and _GUIs["UIInventory"] and ui_inventory and ui_inventory.GUI then
+		try_install_inv_keyboard()
+	end
+end
+
+-- Fallback: install once a second after start so a late-patched
+-- ui_inventory (load order) is still wrapped even if no GUI_on_show
+-- has fired yet.
+local function on_delayed_inv_install()
+	try_install_inv_keyboard()
+	return true
+end
+
+--------------------------------------------------------------------
+-- Hotkey handlers
+--------------------------------------------------------------------
+
+local function handle_key_toggle()
+	-- Smart behaviour: if inventory is open AND cursor is on a magazine,
+	-- fire the sequential load directly instead of opening the overlay.
+	if inventory_open() then
+		local mag = get_hovered_magazine()
+		if mag and sequential_load_magazine and sequential_load_magazine.perform_sequential_load then
+			sequential_load_magazine.perform_sequential_load(mag)
+		end
+		return
+	end
+
+	-- Original behaviour: no GUI open -> toggle the preset overlay.
 	if any_gui_open() then return end
 	if sequential_load_magazine_ui and sequential_load_magazine_ui.toggle then
 		sequential_load_magazine_ui.toggle()
+	end
+end
+
+local function handle_key_dump()
+	if not DEBUG then
+		return
+	end
+	-- Inventory mode: dump magazine under cursor (also handled in inv_keyboard_hook; safe no-op if unfocused).
+	if inventory_open() then
+		local mag = get_hovered_magazine()
+		if mag and sequential_load_magazine and sequential_load_magazine.dump_mag_order then
+			sequential_load_magazine.dump_mag_order(mag)
+		end
+		return
+	end
+
+	-- Weapon mode: inventory closed, configured modifier held, active
+	-- item is a magazine-supporting weapon. Melee / internal-mag weapons
+	-- are filtered out by is_supported_weapon.
+	if not modifier_matches() then return end
+
+	local wpn = db.actor:active_item()
+	if not wpn then return end
+	if not (magazine_binder and magazine_binder.is_supported_weapon
+		and magazine_binder.is_supported_weapon(wpn)) then
+		return
+	end
+	if wpn.weapon_in_grenade_mode and wpn:weapon_in_grenade_mode() then
+		return
+	end
+	if sequential_load_magazine and sequential_load_magazine.dump_weapon_mag then
+		sequential_load_magazine.dump_weapon_mag(wpn)
+	end
+end
+
+local function on_key_press(key)
+	if not db.actor then return end
+	if key == KEY_TOGGLE then
+		handle_key_toggle()
+	elseif key == KEY_DUMP then
+		handle_key_dump()
 	end
 end
 
@@ -101,7 +391,19 @@ end
 --------------------------------------------------------------------
 
 function on_game_start()
-	RegisterScriptCallback("on_option_change",    on_option_change)
-	RegisterScriptCallback("actor_on_first_update", load_settings)
-	RegisterScriptCallback("on_key_press",        on_key_press)
+	RegisterScriptCallback("on_option_change",                on_option_change)
+	RegisterScriptCallback("actor_on_first_update",           load_settings)
+	RegisterScriptCallback("on_key_press",                    on_key_press)
+	RegisterScriptCallback("ActorMenu_on_item_focus_receive", on_item_focus_receive)
+	RegisterScriptCallback("ActorMenu_on_item_focus_lost",    on_item_focus_lost)
+	RegisterScriptCallback("GUI_on_hide",                     on_gui_hide)
+	RegisterScriptCallback("GUI_on_show",                   on_gui_show)
+	-- Install inventory keyboard hook as soon as ui_inventory exists,
+	-- then again after 1s so a mod that patches OnKeyboard later in
+	-- load order (e.g. z_mags_unload_eject) still gets wrapped.
+	CreateTimeEvent("seqload_mcm", "inv_kbd_0", 0, function()
+		try_install_inv_keyboard()
+		return true
+	end)
+	CreateTimeEvent("seqload_mcm", "inv_kbd_1", 1.0, on_delayed_inv_install)
 end

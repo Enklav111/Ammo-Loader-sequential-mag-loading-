@@ -85,11 +85,72 @@
 	</string>
 
 	<string id="ui_mcm_seqload_key_toggle">
-		<text>Menu open key</text>
+		<text>Preset / load-under-cursor key</text>
 	</string>
 
 	<string id="ui_mcm_seqload_key_toggle_desc">
-		<text>Hotkey for opening the sequential load preset configuration window</text>
+		<text>When no GUI is open, opens the sequential load preset configuration window. When the inventory is open and the cursor hovers a magazine, triggers sequential loading of that magazine.</text>
+	</string>
+
+	<string id="ui_mcm_seqload_debug_header">
+		<text>Debug</text>
+	</string>
+
+	<string id="ui_mcm_seqload_debug">
+		<text>Debug (ammo order dump tools)</text>
+	</string>
+
+	<string id="ui_mcm_seqload_debug_desc">
+		<text>When enabled, the following options work: dump key in the inventory (magazine under cursor) and outside the inventory (magazine in the weapon in hand) according to the modifier below. When disabled, key bind is ignored. Preset/sequential load on U is not affected.</text>
+	</string>
+
+	<string id="ui_mcm_seqload_key_dump">
+		<text>Dump key (debug)</text>
+	</string>
+
+	<string id="ui_mcm_seqload_key_dump_desc">
+		<text>Only active when Debug is on. In inventory, shows round order in the magazine under the cursor. Outside inventory, shows round order in the magazine in the hand weapon (use modifier as below). Default: middle mouse. MCM cannot bind to mouse1/2/3 in the UI, but keyboard and mouse4+ are allowed.</text>
+	</string>
+
+	<string id="ui_mcm_seqload_dump_weapon_modifier">
+		<text>Hand weapon: modifier (debug)</text>
+	</string>
+
+	<string id="ui_mcm_seqload_dump_weapon_modifier_desc">
+		<text>With inventory closed, which key must be held with the dump key. None: dump key alone. Default: Shift.</text>
+	</string>
+
+	<string id="st_seqload_dump_empty">
+		<text>Magazine is empty</text>
+	</string>
+
+	<string id="st_seqload_dump_round">
+		<text>%s - %dx</text>
+	</string>
+
+	<string id="st_seqload_dump_more">
+		<text>...</text>
+	</string>
+
+	<string id="st_seqload_dump_no_mag">
+		<text>No magazine attached</text>
+	</string>
+
+	<!-- MCM list/radio: path seqload/dump_weapon_modifier, value 0-3 -->
+	<string id="seqload_dump_weapon_modifier_lst_seqload_mod_none">
+		<text>None (dump key only)</text>
+	</string>
+
+	<string id="seqload_dump_weapon_modifier_lst_seqload_mod_shift">
+		<text>Shift</text>
+	</string>
+
+	<string id="seqload_dump_weapon_modifier_lst_seqload_mod_ctrl">
+		<text>Ctrl</text>
+	</string>
+
+	<string id="seqload_dump_weapon_modifier_lst_seqload_mod_alt">
+		<text>Alt</text>
 	</string>
 
 	<string id="ui_mcm_seqload_instant_load">
