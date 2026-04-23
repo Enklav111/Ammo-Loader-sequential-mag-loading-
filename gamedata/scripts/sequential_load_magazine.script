@@ -296,6 +296,53 @@ local function expand_cycle(preset)
 end
 
 --------------------------------------------------------------------
+-- "Loaded N rounds" tip: first line = total; optional coloured lines
+-- with per-ammo-type counts (one orange block, "\\n" between rows).
+--------------------------------------------------------------------
+
+-- Anomaly news_manager treats the two-char sequence \ + n (Lua "\\n")
+-- as a line break. Real U+0A in this path is lost and lines glue together.
+-- For multi-line coloured text, use ONE %c[colour] for the block and "\\n"
+-- only inside it; repeating %c[default]…%c[colour] per line breaks newlines.
+local MSG_NL = "\\n"
+-- Match dump remainder amber (st_seqload / debug tips).
+local TIP_LOAD_TYPE_COLOR = "%c[255,255,200,100]"
+local TIP_LOAD_TYPE_END   = "%c[default]"
+
+local function build_loaded_rounds_tip_text(total, tally_by_sec)
+	local first = string.format(game.translate_string("st_seqload_loaded"), tostring(total))
+	if not tally_by_sec then
+		return first
+	end
+	local rows = {}
+	for sec, n in pairs(tally_by_sec) do
+		if n and n > 0 then
+			table.insert(rows, { sec = sec, n = n })
+		end
+	end
+	if #rows == 0 then
+		return first
+	end
+	table.sort(rows, function(a, b) return a.sec < b.sec end)
+	local row_fmt = game.translate_string("st_seqload_dump_round")
+	local body_lines = {}
+	for _, e in ipairs(rows) do
+		local nm = game.translate_string(ui_item.get_sec_name(e.sec))
+		table.insert(body_lines, string.format(row_fmt, nm, e.n))
+	end
+	local block = TIP_LOAD_TYPE_COLOR .. table.concat(body_lines, MSG_NL) .. TIP_LOAD_TYPE_END
+	return first .. MSG_NL .. block
+end
+
+-- Same as Mags Redux per-round loader: forces item tooltip / counts to update now.
+-- timed_refresh() debounces ~0.5s and is not enough for instant load or final tick.
+local function refresh_mags_inventory_info()
+	if magazines and magazines.inventory_refresh then
+		magazines.inventory_refresh(2)
+	end
+end
+
+--------------------------------------------------------------------
 -- Instant loading --------------------------------------------------
 --------------------------------------------------------------------
 
@@ -321,6 +368,7 @@ local function perform_instant_load(mag, preset, mag_data, free)
 	if cycle_len == 0 then return end
 
 	local loaded = 0
+	local loaded_by = {}
 	local cycle_pos = 1
 	for _ = 1, free do
 		local round_taken = false
@@ -330,6 +378,7 @@ local function perform_instant_load(mag, preset, mag_data, free)
 			if pool and pool.total > 0 and take_one_round(pool) then
 				stack.push(mag_data.loaded, ammo)
 				loaded = loaded + 1
+				loaded_by[ammo] = (loaded_by[ammo] or 0) + 1
 				cycle_pos = (cycle_pos % cycle_len) + 1
 				round_taken = true
 				break
@@ -344,11 +393,12 @@ local function perform_instant_load(mag, preset, mag_data, free)
 		if xr_sound and xr_sound.set_sound_play then
 			xr_sound.set_sound_play(AC_ID, "reload_shell")
 		end
+		refresh_mags_inventory_info()
 		if magazines and magazines.timed_refresh then
 			magazines.timed_refresh()
 		end
 		news_manager.send_tip(db.actor,
-			string.format(game.translate_string("st_seqload_loaded"), loaded),
+			build_loaded_rounds_tip_text(loaded, loaded_by),
 			nil, "swiss_knife", 4000)
 	end
 end
@@ -360,7 +410,7 @@ end
 local NS = "seqload"
 -- Active gradual loads, keyed by mag id.
 -- Shape: { cycle, cycle_pos, inv, mag_id, max_size, delay_ms,
---          last_tick, loaded, inventory_closed, ev_name }
+--          last_tick, loaded, by_type, inventory_closed, ev_name }
 local in_progress = {}
 
 local function finalize(mag_id, reason)
@@ -371,6 +421,7 @@ local function finalize(mag_id, reason)
 	if magazines and magazines.do_interrupt_magload then
 		magazines.do_interrupt_magload()
 	end
+	refresh_mags_inventory_info()
 	if magazines and magazines.timed_refresh then
 		magazines.timed_refresh()
 	end
@@ -378,7 +429,7 @@ local function finalize(mag_id, reason)
 	if reason == "done" or reason == "exhausted" then
 		if state.loaded > 0 then
 			news_manager.send_tip(db.actor,
-				string.format(game.translate_string("st_seqload_loaded"), state.loaded),
+				build_loaded_rounds_tip_text(state.loaded, state.by_type),
 				nil, "swiss_knife", 4000)
 		elseif reason == "exhausted" then
 			news_manager.send_tip(db.actor, game.translate_string("st_seqload_no_ammo"),
@@ -387,7 +438,7 @@ local function finalize(mag_id, reason)
 	elseif reason == "cancelled" then
 		if state.loaded > 0 then
 			news_manager.send_tip(db.actor,
-				string.format(game.translate_string("st_seqload_loaded"), state.loaded),
+				build_loaded_rounds_tip_text(state.loaded, state.by_type),
 				nil, "swiss_knife", 4000)
 		else
 			news_manager.send_tip(db.actor, game.translate_string("st_seqload_interrupted"),
@@ -453,6 +504,7 @@ local function gradual_tick(mag_id)
 			stack.push(mag_data.loaded, ammo)
 			magazine_binder.set_data(mag_id, mag_data)
 			state.loaded = state.loaded + 1
+			state.by_type[ammo] = (state.by_type[ammo] or 0) + 1
 			state.cycle_pos = (state.cycle_pos % cycle_len) + 1
 			if utils_obj and utils_obj.play_sound then
 				utils_obj.play_sound("magazines\\ammo_load" .. math.random(1, 7))
@@ -518,6 +570,7 @@ local function perform_gradual_load(mag, preset, mag_data, free)
 		delay_ms          = (delay_s or 0.4) * 1000,
 		last_tick         = 0,
 		loaded            = 0,
+		by_type           = {},
 		inventory_closed  = false,
 	}
 
@@ -593,11 +646,25 @@ local DUMP_MAX_ROWS = 10
 -- element. We walk it from end to start and compress consecutive
 -- identical sections into "<localized name> - Nx" rows.
 --
--- NB: Anomaly's news_manager renders the literal two-character "\n"
--- sequence (backslash + 'n') as a line break, NOT the LF control
--- character. So lines are joined with "\\n" (Lua escape = those
--- two chars), matching how other GAMMA mods build multi-line tips.
-local DUMP_NEWLINE = "\\n"
+local DUMP_NEWLINE = MSG_NL
+-- X-Ray news colour tokens (see st_dynamic_news: %c[A,R,G,B] then %c[default]).
+local DUMP_COLOR_REMAINDER = "%c[255,255,200,100]"
+local DUMP_COLOR_END       = "%c[default]"
+
+-- Tally all rounds in mag_data.loaded by ammo section; return sorted
+-- section list (alphabetical) and counts (order-firing is irrelevant here).
+local function tally_loaded_by_ammo(loaded)
+	local t = {}
+	for _, sec in ipairs(loaded) do
+		t[sec] = (t[sec] or 0) + 1
+	end
+	local secs = {}
+	for sec, _ in pairs(t) do
+		table.insert(secs, sec)
+	end
+	table.sort(secs)
+	return secs, t
+end
 
 local function build_dump_text(header, mag_data)
 	local lines = {header}
@@ -628,6 +695,19 @@ local function build_dump_text(header, mag_data)
 	if i >= 1 then
 		table.insert(lines, game.translate_string("st_seqload_dump_more"))
 	end
+
+	-- "Остаток" + per-type lines: one colour run, "\\n" between lines only.
+	local rem_head = game.translate_string("st_seqload_dump_remainder_header")
+	local sorted_secs, tally = tally_loaded_by_ammo(loaded)
+	local rem_lines = { rem_head }
+	for _, sec in ipairs(sorted_secs) do
+		local nm = game.translate_string(ui_item.get_sec_name(sec))
+		table.insert(rem_lines, string.format(row_fmt, nm, tally[sec]))
+	end
+	local rem_block = DUMP_COLOR_REMAINDER
+		.. table.concat(rem_lines, DUMP_NEWLINE) .. DUMP_COLOR_END
+	table.insert(lines, "")
+	table.insert(lines, rem_block)
 
 	return table.concat(lines, DUMP_NEWLINE)
 end
@@ -701,6 +781,47 @@ end
 
 local function menu_action(obj, bag, mode)
 	perform_sequential_load(obj)
+end
+
+--------------------------------------------------------------------
+-- Magazine tooltip: "Type:" + per-ammo tallies (for zzz tooltips hook)
+--------------------------------------------------------------------
+
+function get_mag_ammo_type_tooltip_block(mag_data)
+	if not (mag_data and mag_data.loaded and #mag_data.loaded > 0) then
+		return nil
+	end
+	if not (utils_xml and utils_xml.get_color and ui_item) then
+		return nil
+	end
+	local t = {}
+	for _, sec in ipairs(mag_data.loaded) do
+		t[sec] = (t[sec] or 0) + 1
+	end
+	local rows = {}
+	for sec, n in pairs(t) do
+		if n and n > 0 then
+			table.insert(rows, { sec = sec, n = n })
+		end
+	end
+	if #rows == 0 then
+		return nil
+	end
+	table.sort(rows, function(a, b) return a.sec < b.sec end)
+	local clr_g = utils_xml.get_color("d_green")
+	local clr_2 = utils_xml.get_color("ui_gray_1")
+	if not (clr_g and clr_2) then
+		return nil
+	end
+	local hdr = game.translate_string("st_seqload_tooltip_type_header")
+	-- After clr_g the colour stays active; reset with clr_2 (same as st_mag_ammo_loaded_count line in mags_patches).
+	local parts = { clr_2 .. hdr .. " \\n" }
+	for _, e in ipairs(rows) do
+		local nm = game.translate_string(ui_item.get_sec_short_name(e.sec))
+		table.insert(parts,
+			clr_2 .. nm .. " - " .. clr_g .. tostring(e.n) .. "x" .. clr_2 .. " \\n")
+	end
+	return table.concat(parts, "")
 end
 
 --------------------------------------------------------------------

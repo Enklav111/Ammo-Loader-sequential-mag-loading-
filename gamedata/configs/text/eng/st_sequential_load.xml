@@ -136,6 +136,10 @@
 		<text>No magazine attached</text>
 	</string>
 
+	<string id="st_seqload_dump_remainder_header">
+		<text>Remainder:</text>
+	</string>
+
 	<!-- MCM list/radio: path seqload/dump_weapon_modifier, value 0-3 -->
 	<string id="seqload_dump_weapon_modifier_lst_seqload_mod_none">
 		<text>None (dump key only)</text>
@@ -167,6 +171,18 @@
 
 	<string id="ui_mcm_seqload_ignore_bad_ammo_desc">
 		<text>If enabled - ammo with _bad and _verybad suffix (damaged) is hidden from the preset configuration menu and is not loaded into magazines. Enabled by default.</text>
+	</string>
+
+	<string id="ui_mcm_seqload_tooltip_ammo_types">
+		<text>Magazine tooltip: ammo types</text>
+	</string>
+
+	<string id="ui_mcm_seqload_tooltip_ammo_types_desc">
+		<text>If enabled, the magazine item tooltip shows a &quot;Type:&quot; section with how many rounds of each ammo type are inside, between the loaded count and &quot;Round on top&quot; (or before the detailed round list). Colours match the default Mags Redux tooltip. Enabled by default.</text>
+	</string>
+
+	<string id="st_seqload_tooltip_type_header">
+		<text>Type:</text>
 	</string>
 
 </string_table>

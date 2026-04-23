@@ -130,6 +130,10 @@
 		<text>Магазин не установлен</text>
 	</string>
 
+	<string id="st_seqload_dump_remainder_header">
+		<text>Остаток:</text>
+	</string>
+
 	<string id="seqload_dump_weapon_modifier_lst_seqload_mod_none">
 		<text>Без модификатора (только клавиша дампа)</text>
 	</string>
@@ -160,6 +164,18 @@
 
 	<string id="ui_mcm_seqload_ignore_bad_ammo_desc">
 		<text>Если включено - патроны с суффиксом _bad и _verybad (испорченные) не показываются в меню настройки пресета и не заряжаются в магазин. По умолчанию включено.</text>
+	</string>
+
+	<string id="ui_mcm_seqload_tooltip_ammo_types">
+		<text>Тултип магазина: типы патронов</text>
+	</string>
+
+	<string id="ui_mcm_seqload_tooltip_ammo_types_desc">
+		<text>Если включено, в описании магазина показывается блок «Тип:» с количеством патронов каждого типа — между строкой «Заряжено патронов» и «Патрон сверху» (или перед подробным списком по порядку). Цвета как у стандартного тултипа Mags Redux. По умолчанию включено.</text>
+	</string>
+
+	<string id="st_seqload_tooltip_type_header">
+		<text>Тип:</text>
 	</string>
 
 </string_table>

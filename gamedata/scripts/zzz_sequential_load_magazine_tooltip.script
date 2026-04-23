@@ -1,0 +1,65 @@
+----------------------------------------------------------------
+-- Injects a "Type:" + per-ammo count block into the magazine
+-- item tooltip, between the loaded count line and "Round on top:"
+-- (or before the per-round bullet list when mag tooltip is detailed).
+-- Loads after mags_patches.script (name starts with zzz_).
+----------------------------------------------------------------
+
+local function mcm_allows_tooltip_block()
+	if not sequential_load_magazine_mcm then
+		return true
+	end
+	if sequential_load_magazine_mcm.TOOLTIP_AMMO_TYPES == false then
+		return false
+	end
+	if sequential_load_magazine_mcm.TOOLTIP_AMMO_TYPES == 0 then
+		return false
+	end
+	return true
+end
+
+local function inject_mag_type_block(result, obj)
+	if not mcm_allows_tooltip_block() then
+		return result
+	end
+	if not (sequential_load_magazine and sequential_load_magazine.get_mag_ammo_type_tooltip_block) then
+		return result
+	end
+	if not (obj and magazine_binder and magazine_binder.is_magazine
+		and magazine_binder.is_magazine(obj)) then
+		return result
+	end
+	local mag_data = magazine_binder.get_data(obj:id())
+	if not mag_data or #mag_data.loaded < 1 then
+		return result
+	end
+	local block = sequential_load_magazine.get_mag_ammo_type_tooltip_block(mag_data)
+	if not block or block == "" then
+		return result
+	end
+	local s = result
+	-- Mags Redux simple tooltip: insert before "Round on top:".
+	local top_lbl = game.translate_string("st_mag_ammo_top_round")
+	local pos = string.find(s, top_lbl, 1, true)
+	if pos then
+		return string.sub(s, 1, pos - 1) .. block .. string.sub(s, pos)
+	end
+	-- Detailed mag tooltip: first bullet line (•) after the loaded line.
+	local loaded_lbl = game.translate_string("st_mag_ammo_loaded_count")
+	local li = string.find(s, loaded_lbl, 1, true)
+	if not li then
+		return s
+	end
+	local dot = game.translate_string("st_dot")
+	local anchor = "\\n " .. dot
+	local apos = string.find(s, anchor, li, true)
+	if not apos then
+		return s
+	end
+	return string.sub(s, 1, apos - 1) .. block .. string.sub(s, apos)
+end
+
+local _prev_build_desc_footer = ui_item.build_desc_footer
+function ui_item.build_desc_footer(obj, sec, str)
+	return inject_mag_type_block(_prev_build_desc_footer(obj, sec, str), obj)
+end

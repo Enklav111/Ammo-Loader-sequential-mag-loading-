@@ -18,6 +18,8 @@
 --                          delay (default: false).
 --   IGNORE_BAD           - if true, _bad / _verybad ammo is hidden
 --                          from the UI and skipped (default: true).
+--   TOOLTIP_AMMO_TYPES   - if true, magazine tooltip shows a "Type:"
+--                          block with per-ammo counts (default: true).
 ----------------------------------------------------------------
 
 KEY_TOGGLE       = DIK_keys.DIK_U
@@ -26,6 +28,7 @@ DUMP_MODIFIER    = 1           -- 0=none, 1=shift, 2=ctrl, 3=alt
 DEBUG            = false
 INSTANT_LOAD     = false
 IGNORE_BAD       = true
+TOOLTIP_AMMO_TYPES = true
 
 local function get_mcm_value(path, default)
 	if ui_mcm and ui_mcm.get then
@@ -68,6 +71,12 @@ function on_mcm_load()
 			},
 			{
 				id = "ignore_bad_ammo",
+				type = "check",
+				val = 1,
+				def = true,
+			},
+			{
+				id = "tooltip_ammo_types",
 				type = "check",
 				val = 1,
 				def = true,
@@ -118,6 +127,8 @@ local function load_settings()
 	DEBUG         = (dbg == true) or (dbg == 1)
 	INSTANT_LOAD  = get_mcm_value("seqload/instant_load",          false)
 	IGNORE_BAD    = get_mcm_value("seqload/ignore_bad_ammo",       true)
+	local tip_amt = get_mcm_value("seqload/tooltip_ammo_types",  true)
+	TOOLTIP_AMMO_TYPES = not (tip_amt == false or tip_amt == 0)
 end
 
 function on_option_change()
