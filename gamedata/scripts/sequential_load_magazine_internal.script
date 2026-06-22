@@ -45,10 +45,21 @@
 local function dbg_enabled()
 	return sequential_load_magazine_mcm and sequential_load_magazine_mcm.DEBUG
 end
+-- Robust debug print: Anomaly's printf can leave %d/%s unsubstituted when
+-- an argument type mismatches the format, producing unreadable logs. Format
+-- inside a pcall and, on failure, fall back to "fmt | arg1 | arg2 | ..." so
+-- the values are always visible.
 local function dbg(fmt, ...)
-	if dbg_enabled() then
-		printf("[seqload_int] " .. fmt, ...)
+	if not dbg_enabled() then return end
+	local ok, msg = pcall(string.format, fmt, ...)
+	if not ok then
+		local parts = { fmt }
+		for i = 1, select("#", ...) do
+			parts[#parts + 1] = tostring((select(i, ...)))
+		end
+		msg = table.concat(parts, " | ")
 	end
+	printf("[seqload_int] %s", msg)
 end
 
 --------------------------------------------------------------------
@@ -72,6 +83,33 @@ local state_by_id = {}
 
 local section_cache = {}
 
+-- Weapon engine classes whose internal magazine does NOT reliably keep the
+-- per-round ammo type after a shot, because the engine stores a SINGLE
+-- ammo_type for the whole magazine and these classes don't re-read it
+-- between rapid shots / shell-by-shell feeds. For them we re-assert the
+-- chamber type every stable tick (see actor_on_update_impl).
+--   WP_BM16  - double-barrel shotguns (toz34, bm16, ...)
+--   WP_ASHTG - pump / automatic / revolver shotguns and bolt rifles
+--              (mp133, ithacam37, mts255, k98, sks, ...)
+-- Magazine-fed classes (WP_USP45, WP_AK74, ...) already re-chamber fine
+-- and are intentionally excluded so working weapons stay untouched.
+local CHAMBER_ENFORCE_CLASSES = {
+	["WP_ASHTG"] = true,
+}
+
+-- Weapon engine classes that physically CANNOT hold mixed ammo types and
+-- whose set_ammo_type is purely cosmetic once rounds are loaded:
+--   WP_BM16 - break-action double-barrels (toz34, bm16, ...). Both barrels
+--             hold the concrete ammo type selected at reload time; changing
+--             ammo_type afterwards only updates the displayed type, NOT the
+--             round that actually fires. Attempting sequential loading here
+--             also wastes ammo (we'd consume one type from the inventory but
+--             fire another), so we skip these weapons entirely and let them
+--             behave like vanilla.
+local INELIGIBLE_CLASSES = {
+	["WP_BM16"] = true,
+}
+
 local function split_csv(s)
 	local out = {}
 	if not s then return out end
@@ -82,17 +120,24 @@ local function split_csv(s)
 end
 
 local function build_section_info(sec)
+	local wpn_class = SYS_GetParam(0, sec, "class")
 	local info = {
 		ammo_list = split_csv(SYS_GetParam(0, sec, "ammo_class") or ""),
 		mag_size  = SYS_GetParam(2, sec, "ammo_mag_size") or 0,
+		class     = wpn_class,
+		enforce_chamber = (wpn_class ~= nil) and CHAMBER_ENFORCE_CLASSES[wpn_class] == true,
 	}
 	if #info.ammo_list > 0 and sequential_load_magazine
 		and sequential_load_magazine.extract_caliber then
 		info.caliber = sequential_load_magazine.extract_caliber(info.ammo_list[1])
 	end
 	-- Eligible when there is at least one ammo type and the magazine
-	-- holds more than one round (skip single-shot weapons).
-	info.eligible = (#info.ammo_list > 0) and (info.mag_size > 1) and (info.caliber ~= nil)
+	-- holds more than one round (skip single-shot weapons). Classes that
+	-- cannot physically hold mixed ammo (WP_BM16) are excluded so they keep
+	-- vanilla behaviour instead of wasting ammo on a swap that never fires.
+	info.eligible = (#info.ammo_list > 0) and (info.mag_size > 1)
+		and (info.caliber ~= nil)
+		and not (wpn_class ~= nil and INELIGIBLE_CLASSES[wpn_class] == true)
 	section_cache[sec] = info
 	return info
 end
@@ -762,6 +807,36 @@ local function actor_on_update_impl()
 		ensure_reload_ammo_available(wpn, info, s)
 	end
 
+	-- Self-correcting chamber sync. Double-barrels and shell-by-shell
+	-- shotguns can keep the previously-chambered ammo type after a shot
+	-- (engine holds one ammo_type per mag and doesn't re-read it between
+	-- the two barrels / rapid feeds), which makes every round fire as the
+	-- same type even though mag_data alternates correctly. Re-assert the
+	-- intended top-of-stack round, but ONLY when:
+	--   * the weapon class is one of the affected ones,
+	--   * the round count is stable this tick (not mid load/unload/fire), and
+	--   * the chambered type actually drifted from the stack top.
+	-- The drift check keeps this a cheap no-op for everything else and
+	-- avoids spamming set_ammo_type on weapons that already behave.
+	if info.enforce_chamber and cur == prev and cur > 0 and #s.stack > 0 then
+		local want = s.stack[#s.stack]
+		local have = get_engine_sec(wpn, info)
+		if want and have and want ~= have then
+			-- Throttle: at most ~5 attempts/sec, so a class that genuinely
+			-- refuses the switch can never spam set_ammo_type every frame.
+			local tg = time_global()
+			if not s.last_chamber_fix or tg >= s.last_chamber_fix + 200 then
+				s.last_chamber_fix = tg
+				dbg("chamber drift fix: class=%s want=%s have=%s mr=%s cnt=%d stack=%d",
+					tostring(info.class), tostring(want), tostring(have),
+					tostring(s.mr_managed), cur, #s.stack)
+				sync_weapon_from_stack(wpn, info, s.stack, s.mr_managed)
+				local after = get_engine_sec(wpn, info)
+				dbg("chamber after fix: have=%s (wanted %s)", tostring(after), tostring(want))
+			end
+		end
+	end
+
 	s.last_count = get_ammo_count(wpn)
 end
 
@@ -788,6 +863,13 @@ local function actor_on_weapon_fired_impl(actor, wpn)
 	local s = state_by_id[wpn:id()]
 	if not s then return end
 
+	if info.enforce_chamber then
+		dbg("FIRED: class=%s chambered=%s stack_top=%s cnt=%d stack=%d mr=%s",
+			tostring(info.class), tostring(get_engine_sec(wpn, info)),
+			tostring(s.stack[#s.stack]), get_ammo_count(wpn), #s.stack,
+			tostring(s.mr_managed))
+	end
+
 	-- Mags Redux owns the stack for mr_managed weapons and pops it
 	-- in its own actor_on_weapon_fired. We must NOT double-pop.
 	if s.mr_managed then
@@ -809,7 +891,12 @@ local function actor_on_weapon_fired_impl(actor, wpn)
 	if #s.stack > 0 then
 		pop_one_round(s.stack)
 	end
-	reconcile_stack_count(wpn, info, s)
+	-- NOTE: do NOT call reconcile_stack_count() here. Some classes (WP_BM16
+	-- double-barrels) return a stale get_ammo_in_magazine() at the fire
+	-- callback (still the pre-shot count), so reconciling now would re-push
+	-- the round we just popped and leave the same type chambered for the
+	-- next barrel. Count reconciliation is done safely in actor_on_update's
+	-- fired_pending branch once the engine counter has actually dropped.
 	s.last_count = get_ammo_count(wpn)
 	s.fire_drops_pending = (s.fire_drops_pending or 0) + 1
 	-- Engine chamber type updates after the shot animation; sync twice.

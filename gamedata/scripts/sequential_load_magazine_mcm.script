@@ -290,6 +290,20 @@ local function get_hovered_actor_mag()
 	end
 	local obj = resolve_hovered_obj()
 	if not obj then return nil end
+	-- The cached focus object can outlive the item it points to (consumed,
+	-- moved, sold, ...). Calling :section() on a destroyed object crashes
+	-- the game, so re-fetch a live object by id first. obj:id() is safe on
+	-- a destroyed object; level.object_by_id returns nil once it's gone.
+	local ok_id, id = pcall(function() return obj:id() end)
+	if not ok_id or not id then
+		hovered_obj = nil
+		return nil
+	end
+	obj = level.object_by_id(id)
+	if not obj then
+		hovered_obj = nil
+		return nil
+	end
 	if not magazine_binder.is_magazine(obj) then return nil end
 	local p = obj:parent()
 	if not p or p:id() ~= AC_ID then return nil end
