@@ -59,7 +59,13 @@ local function inject_mag_type_block(result, obj)
 	return string.sub(s, 1, apos - 1) .. block .. string.sub(s, apos)
 end
 
-local _prev_build_desc_footer = ui_item.build_desc_footer
-function ui_item.build_desc_footer(obj, sec, str)
-	return inject_mag_type_block(_prev_build_desc_footer(obj, sec, str), obj)
+-- Install only if ui_item exposes build_desc_footer (Mags Redux / vanilla).
+-- If it doesn't exist (e.g. Mags missing or load order quirk), do nothing
+-- — the mod stays passive instead of crashing on first tooltip.
+if ui_item and type(ui_item.build_desc_footer) == "function" then
+	local _prev_build_desc_footer = ui_item.build_desc_footer
+	function ui_item.build_desc_footer(obj, sec, str)
+		local base = _prev_build_desc_footer and _prev_build_desc_footer(obj, sec, str) or (str or "")
+		return inject_mag_type_block(base, obj)
+	end
 end

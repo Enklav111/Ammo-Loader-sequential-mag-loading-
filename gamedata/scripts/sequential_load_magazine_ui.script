@@ -7,9 +7,9 @@
 ----------------------------------------------------------------
 
 local core = sequential_load_magazine
-local MAX_ROWS = 6
-local ROW_HEIGHT = 44
-local ROW_GAP = 2
+-- Viewport height in XML is 286px (~6 rows at 44+2). More rows -> scrollbar.
+-- MAX_PRESET_ROWS is a safety cap only; rows are created on demand, not pre-allocated.
+local MAX_PRESET_ROWS = 48
 
 local GUI = nil
 
@@ -45,8 +45,15 @@ function UISequentialLoad:InitControls()
 	self.caliber_combo = self.xml:InitComboBox("main:caliber_combo", self.dialog)
 	self:Register(self.caliber_combo, "caliber_combo")
 
-	-- Preset rows live directly inside self.dialog; their y-offset is
-	-- derived from MAX_ROWS * ROW_HEIGHT constants, not from any XML node.
+	-- Preset rows live directly inside the ScrollView (one Static per row).
+	-- ScrollView lays them out vertically with vert_interval from XML and
+	-- forwards mouse clicks to inner widgets only when they are direct
+	-- children of the scroll. An intermediate CUIWindow container breaks
+	-- click forwarding for some inner widgets (- / + / arrow buttons), so
+	-- we attach rows straight to preset_scroll, like furniture_piano /
+	-- pda_taskboard do.
+	self.preset_scroll = self.xml:InitScrollView("main:preset_scroll", self.dialog)
+	self:Register(self.preset_scroll, "preset_scroll")
 
 	self.add_combo = self.xml:InitComboBox("main:add_combo", self.dialog)
 	self:Register(self.add_combo, "add_combo")
@@ -63,11 +70,9 @@ function UISequentialLoad:InitControls()
 	self.btn_close = self.xml:Init3tButton("main:btn_close", self.dialog)
 	self:Register(self.btn_close, "btn_close")
 
-	-- Pre-allocate reusable row widget sets (MAX_ROWS rows).
+	-- Rows table: built on demand by RefreshRows (Clear+recreate pattern,
+	-- as in PDA Taskboard). No pre-allocation.
 	self.rows = {}
-	for i = 1, MAX_ROWS do
-		self.rows[i] = self:CreateRow(i)
-	end
 
 	self:PopulateCaliberCombo()
 end
@@ -78,21 +83,7 @@ function UISequentialLoad:InitCallbacks()
 	self:AddCallback("btn_save",   ui_events.BUTTON_CLICKED, self.OnSaveClick,  self)
 	self:AddCallback("btn_reset",  ui_events.BUTTON_CLICKED, self.OnResetClick, self)
 	self:AddCallback("btn_close",  ui_events.BUTTON_CLICKED, self.OnCloseClick, self)
-
-	-- Dynamic row buttons: one callback per (row_index, action).
-	for i = 1, MAX_ROWS do
-		local idx = i
-		self:AddCallback("row_" .. i .. "_minus",  ui_events.BUTTON_CLICKED,
-			function() self:OnRowMinus(idx) end, self)
-		self:AddCallback("row_" .. i .. "_plus",   ui_events.BUTTON_CLICKED,
-			function() self:OnRowPlus(idx) end, self)
-		self:AddCallback("row_" .. i .. "_up",     ui_events.BUTTON_CLICKED,
-			function() self:OnRowMove(idx, -1) end, self)
-		self:AddCallback("row_" .. i .. "_down",   ui_events.BUTTON_CLICKED,
-			function() self:OnRowMove(idx, 1) end, self)
-		self:AddCallback("row_" .. i .. "_remove", ui_events.BUTTON_CLICKED,
-			function() self:OnRowRemove(idx) end, self)
-	end
+	-- Per-row callbacks are bound inside CreateRow when each row is built.
 end
 
 --------------------------------------------------------------------
@@ -100,47 +91,44 @@ end
 --------------------------------------------------------------------
 
 function UISequentialLoad:CreateRow(i)
-	-- Anchor y inside self.dialog. preset_anchor origin is at (20, 118) per XML.
-	-- We attach row widgets to self.dialog and position them absolute-within-dialog.
-	local base_y = 118 + (i - 1) * (ROW_HEIGHT + ROW_GAP)
-	local base_x = 20
+	-- Each row is its own Static parented to preset_scroll. ScrollView
+	-- handles vertical layout and click clipping. XML coords for inner
+	-- widgets ("row:bg", "row:icon", ...) are row-local and need NO shift.
+	local row_wnd = self.xml:InitStatic("row", self.preset_scroll)
 
-	local row = {}
+	local row = { wnd = row_wnd }
+	row.bg        = self.xml:InitStatic  ("row:bg",        row_wnd)
+	row.icon      = self.xml:InitStatic  ("row:icon",      row_wnd)
+	row.name      = self.xml:InitTextWnd ("row:name",      row_wnd)
+	row.sec       = self.xml:InitTextWnd ("row:ammo_sec",  row_wnd)
+	row.count_txt = self.xml:InitTextWnd ("row:count_text", row_wnd)
+	row.btn_minus = self.xml:Init3tButton("row:btn_minus", row_wnd)
+	row.btn_plus  = self.xml:Init3tButton("row:btn_plus",  row_wnd)
+	row.btn_up    = self.xml:Init3tButton("row:btn_up",    row_wnd)
+	row.btn_down  = self.xml:Init3tButton("row:btn_down",  row_wnd)
+	row.btn_remove = self.xml:Init3tButton("row:btn_remove", row_wnd)
 
-	row.bg        = self.xml:InitStatic  ("row:bg",        self.dialog)
-	row.icon      = self.xml:InitStatic  ("row:icon",      self.dialog)
-	row.name      = self.xml:InitTextWnd ("row:name",      self.dialog)
-	row.sec       = self.xml:InitTextWnd ("row:ammo_sec",  self.dialog)
-	row.count_txt = self.xml:InitTextWnd ("row:count_text",self.dialog)
-	row.btn_minus = self.xml:Init3tButton("row:btn_minus", self.dialog)
-	row.btn_plus  = self.xml:Init3tButton("row:btn_plus",  self.dialog)
-	row.btn_up    = self.xml:Init3tButton("row:btn_up",    self.dialog)
-	row.btn_down  = self.xml:Init3tButton("row:btn_down",  self.dialog)
-	row.btn_remove= self.xml:Init3tButton("row:btn_remove",self.dialog)
-
-	-- Shift each widget by (base_x, base_y) since XML coords are row-local.
-	local function shift(w, dx, dy)
-		local p = w:GetWndPos()
-		w:SetWndPos(vector2():set(p.x + dx, p.y + dy))
-	end
-	for _, w in pairs(row) do
-		shift(w, base_x, base_y)
-	end
-
+	-- Register + bind per-row callbacks. Names include the row index so
+	-- different rows don't share the same callback slot.
+	local idx = i
 	self:Register(row.btn_minus,  "row_" .. i .. "_minus")
 	self:Register(row.btn_plus,   "row_" .. i .. "_plus")
 	self:Register(row.btn_up,     "row_" .. i .. "_up")
 	self:Register(row.btn_down,   "row_" .. i .. "_down")
 	self:Register(row.btn_remove, "row_" .. i .. "_remove")
 
-	self:SetRowVisible(row, false)
-	return row
-end
+	self:AddCallback("row_" .. i .. "_minus",  ui_events.BUTTON_CLICKED,
+		function() self:OnRowMinus(idx) end, self)
+	self:AddCallback("row_" .. i .. "_plus",   ui_events.BUTTON_CLICKED,
+		function() self:OnRowPlus(idx) end, self)
+	self:AddCallback("row_" .. i .. "_up",     ui_events.BUTTON_CLICKED,
+		function() self:OnRowMove(idx, -1) end, self)
+	self:AddCallback("row_" .. i .. "_down",   ui_events.BUTTON_CLICKED,
+		function() self:OnRowMove(idx, 1) end, self)
+	self:AddCallback("row_" .. i .. "_remove", ui_events.BUTTON_CLICKED,
+		function() self:OnRowRemove(idx) end, self)
 
-function UISequentialLoad:SetRowVisible(row, visible)
-	for _, w in pairs(row) do
-		w:Show(visible)
-	end
+	return row
 end
 
 function UISequentialLoad:ApplyRow(i, entry)
@@ -162,8 +150,6 @@ function UISequentialLoad:ApplyRow(i, entry)
 		row.icon:SetTextureRect(Frect():set(axis.x1, axis.y1, axis.x2, axis.y2))
 		row.icon:SetStretchTexture(true)
 	end
-
-	self:SetRowVisible(row, true)
 end
 
 --------------------------------------------------------------------
@@ -200,6 +186,7 @@ function UISequentialLoad:LoadPresetForCurrent()
 		self.working_preset = {}
 		self:RefreshRows()
 		self:RefreshAddCombo()
+		self:ResetPresetScrollPos()
 		return
 	end
 	local saved = core.get_preset(self.current_caliber)
@@ -221,16 +208,24 @@ function UISequentialLoad:LoadPresetForCurrent()
 	end
 	self:RefreshRows()
 	self:RefreshAddCombo()
+	self:ResetPresetScrollPos()
+end
+
+function UISequentialLoad:ResetPresetScrollPos()
+	if not self.preset_scroll then return end
+	self.preset_scroll:SetScrollPos(0)
 end
 
 function UISequentialLoad:RefreshRows()
-	local n = math.min(#self.working_preset, MAX_ROWS)
-	for i = 1, MAX_ROWS do
-		if i <= n then
-			self:ApplyRow(i, self.working_preset[i])
-		else
-			self:SetRowVisible(self.rows[i], false)
-		end
+	-- Wipe-and-rebuild keeps ScrollView layout / click clipping consistent.
+	-- Same pattern as 293- PDA Taskboard's clear_taskboard_ui + AddWindow.
+	self.preset_scroll:Clear()
+	self.rows = {}
+
+	local n = math.min(#self.working_preset, MAX_PRESET_ROWS)
+	for i = 1, n do
+		self.rows[i] = self:CreateRow(i)
+		self:ApplyRow(i, self.working_preset[i])
 	end
 end
 
@@ -241,20 +236,16 @@ function UISequentialLoad:RefreshAddCombo()
 		return
 	end
 	local ammos = core.get_ammos_for_caliber(self.current_caliber)
-	local used = {}
-	for _, e in ipairs(self.working_preset) do
-		used[e.ammo] = true
-	end
 	local first_available = nil
 	local idx = 0
 	self.available_in_add = {}
+	-- Allow the same ammo type to be added multiple times as separate
+	-- preset rows (e.g. buck -> slug -> buck for flexible alternation).
 	for _, a in ipairs(ammos) do
-		if not used[a] then
-			idx = idx + 1
-			self.available_in_add[idx] = a
-			self.add_combo:AddItem(game.translate_string(ui_item.get_sec_name(a)), idx)
-			first_available = first_available or {idx = idx, ammo = a}
-		end
+		idx = idx + 1
+		self.available_in_add[idx] = a
+		self.add_combo:AddItem(game.translate_string(ui_item.get_sec_name(a)), idx)
+		first_available = first_available or {idx = idx, ammo = a}
 	end
 	if first_available then
 		self.add_combo:enable_id(first_available.idx)
@@ -310,7 +301,7 @@ function UISequentialLoad:OnRowRemove(idx)
 end
 
 function UISequentialLoad:OnAddClick()
-	if #self.working_preset >= MAX_ROWS then return end
+	if #self.working_preset >= MAX_PRESET_ROWS then return end
 	local id = self.add_combo:CurrentID()
 	local ammo = self.available_in_add and self.available_in_add[id]
 	if not ammo then return end
@@ -360,9 +351,10 @@ end
 
 function show()
 	if not db.actor then return end
-	if not (sequential_load_magazine and magazine_binder) then return end
+	if not sequential_load_magazine then return end
 	if GUI and GUI:IsShown() then return end
 
+	if core.reset_caliber_cache then core.reset_caliber_cache() end
 	if not GUI then GUI = UISequentialLoad() end
 	GUI:ShowDialog(true)
 	Register_UI("UISequentialLoad", "sequential_load_magazine_ui")

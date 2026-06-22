@@ -18,17 +18,36 @@
 --                          delay (default: false).
 --   IGNORE_BAD           - if true, _bad / _verybad ammo is hidden
 --                          from the UI and skipped (default: true).
+--   TIP_AFTER_LOAD       - if true, a short summary tip ("Loaded N
+--                          rounds" + per-type breakdown) is shown after
+--                          a successful load (default: true). Status
+--                          tips ("no ammo", "interrupted") are unaffected.
 --   TOOLTIP_AMMO_TYPES   - if true, magazine tooltip shows a "Type:"
 --                          block with per-ammo counts (default: true).
+--   INTERNAL_MAG_ENABLED - if true, the mod also handles weapons
+--                          without a Mags Redux magazine (pump
+--                          shotguns, internal-mag rifles, all weapons
+--                          when Mags Redux is missing entirely).
+--                          Uses the SAME caliber preset as magazines.
+--                          When disabled, internal-mag weapons behave
+--                          stock (single ammo type per reload).
+--                          Default: true.
+--   HIDE_SINGLE_CALIBER    - if true, calibers with only one ammo
+--                          type are hidden from the preset UI dropdown
+--                          (default: true). Devices/knives/batteries
+--                          are always excluded regardless.
 ----------------------------------------------------------------
 
-KEY_TOGGLE       = DIK_keys.DIK_U
-KEY_DUMP         = 339         -- mouse3 / MMB
-DUMP_MODIFIER    = 1           -- 0=none, 1=shift, 2=ctrl, 3=alt
-DEBUG            = false
-INSTANT_LOAD     = false
-IGNORE_BAD       = true
-TOOLTIP_AMMO_TYPES = true
+KEY_TOGGLE             = DIK_keys.DIK_U
+KEY_DUMP               = 339         -- mouse3 / MMB
+DUMP_MODIFIER          = 1           -- 0=none, 1=shift, 2=ctrl, 3=alt
+DEBUG                   = false
+INSTANT_LOAD            = false
+IGNORE_BAD              = true
+TIP_AFTER_LOAD          = true
+TOOLTIP_AMMO_TYPES      = true
+INTERNAL_MAG_ENABLED    = true
+HIDE_SINGLE_CALIBER     = true
 
 local function get_mcm_value(path, default)
 	if ui_mcm and ui_mcm.get then
@@ -75,8 +94,27 @@ function on_mcm_load()
 				val = 1,
 				def = true,
 			},
+			-- Notification toggles: grouped together so they're easy to find.
+			{
+				id = "tip_after_load",
+				type = "check",
+				val = 1,
+				def = true,
+			},
 			{
 				id = "tooltip_ammo_types",
+				type = "check",
+				val = 1,
+				def = true,
+			},
+			{
+				id = "internal_mag_enabled",
+				type = "check",
+				val = 1,
+				def = true,
+			},
+			{
+				id = "hide_single_type_calibers",
 				type = "check",
 				val = 1,
 				def = true,
@@ -127,12 +165,21 @@ local function load_settings()
 	DEBUG         = (dbg == true) or (dbg == 1)
 	INSTANT_LOAD  = get_mcm_value("seqload/instant_load",          false)
 	IGNORE_BAD    = get_mcm_value("seqload/ignore_bad_ammo",       true)
-	local tip_amt = get_mcm_value("seqload/tooltip_ammo_types",  true)
+	local tip_atl = get_mcm_value("seqload/tip_after_load",        true)
+	TIP_AFTER_LOAD = not (tip_atl == false or tip_atl == 0)
+	local tip_amt = get_mcm_value("seqload/tooltip_ammo_types",    true)
 	TOOLTIP_AMMO_TYPES = not (tip_amt == false or tip_amt == 0)
+	local intm    = get_mcm_value("seqload/internal_mag_enabled",  true)
+	INTERNAL_MAG_ENABLED = not (intm == false or intm == 0)
+	local hide1   = get_mcm_value("seqload/hide_single_type_calibers", true)
+	HIDE_SINGLE_CALIBER = not (hide1 == false or hide1 == 0)
 end
 
 function on_option_change()
 	load_settings()
+	if sequential_load_magazine and sequential_load_magazine.reset_caliber_cache then
+		sequential_load_magazine.reset_caliber_cache()
+	end
 end
 
 --------------------------------------------------------------------
@@ -178,30 +225,6 @@ local function on_item_focus_lost(obj)
 	end
 end
 
--- Object under cursor. First consult the focus cache; fall back to
--- reading ui_inventory.GUI.hover for defence-in-depth (some GAMMA
--- UI forks may not fire the focus callback in every mode).
-local function get_hovered_obj()
-	if hovered_obj then return hovered_obj end
-	if not (ui_inventory and ui_inventory.GUI) then return nil end
-	local hover = ui_inventory.GUI.hover
-	if not (hover and hover.bag and hover.idx) then return nil end
-	local cc = ui_inventory.GUI.CC and ui_inventory.GUI.CC[hover.bag]
-	if not cc then return nil end
-	return cc:GetObj(hover.idx)
-end
-
--- Object under cursor IF it is a magazine in the player's own inventory.
-local function get_hovered_magazine()
-	if not magazine_binder then return nil end
-	local obj = get_hovered_obj()
-	if not obj then return nil end
-	if not magazine_binder.is_magazine(obj) then return nil end
-	local parent = obj:parent()
-	if not (parent and parent:id() == AC_ID) then return nil end
-	return obj
-end
-
 -- Reset the hover cache whenever any GUI closes (inventory closing
 -- won't fire ActorMenu_on_item_focus_lost for whatever was last
 -- hovered, so we can end up with a stale obj pointer).
@@ -238,35 +261,38 @@ end
 
 local inv_kb_chain = nil
 
--- Byte-for-byte logic as Mags_Unload_and_Eject get_hover(); do not
--- over-validate bag/idx — GAMMA hover state can be idx-only in some cases.
-local function get_hover()
-	if not (ui_inventory and ui_inventory.GUI) then
+-- Resolve the object the cursor is over. Two sources, in priority order:
+--   1) ActorMenu focus cache (ActorMenu_on_item_focus_receive),
+--   2) ui_inventory.GUI.hover  (Mags Unload-style direct read).
+-- Why both: focus cache is the most reliable signal in regular inventory
+-- mode but isn't always populated in repair / loot / GAMMA UI forks; the
+-- direct hover read covers those, with extra nil-guards (hover.bag can
+-- be `false`/nil while idx is set in some forks).
+local function resolve_hovered_obj()
+	if hovered_obj then return hovered_obj end
+	if not (ui_inventory and ui_inventory.GUI and ui_inventory.GUI.CC) then
 		return nil
 	end
-	local bag = ui_inventory.GUI.hover.bag
-	local idx = ui_inventory.GUI.hover.idx
-	if idx then
-		return ui_inventory.GUI.CC[bag]:GetObj(idx)
-	end
+	local hov = ui_inventory.GUI.hover
+	if not hov then return nil end
+	local bag = hov.bag
+	local idx = hov.idx
+	if not (bag and idx) then return nil end
+	local cc = ui_inventory.GUI.CC[bag]
+	if not cc then return nil end
+	return cc:GetObj(idx)
 end
 
--- Magazine under cursor, must belong to the actor (bag/equip/belt).
+-- Resolved object IF it is a magazine in the actor's own inventory.
 local function get_hovered_actor_mag()
-	if not magazine_binder or not magazine_binder.is_magazine then
+	if not (magazine_binder and magazine_binder.is_magazine) then
 		return nil
 	end
-	local obj = get_hover()
-	if not obj then
-		return nil
-	end
-	if not magazine_binder.is_magazine(obj) then
-		return nil
-	end
+	local obj = resolve_hovered_obj()
+	if not obj then return nil end
+	if not magazine_binder.is_magazine(obj) then return nil end
 	local p = obj:parent()
-	if not p or p:id() ~= AC_ID then
-		return nil
-	end
+	if not p or p:id() ~= AC_ID then return nil end
 	return obj
 end
 
@@ -342,7 +368,7 @@ local function handle_key_toggle()
 	-- Smart behaviour: if inventory is open AND cursor is on a magazine,
 	-- fire the sequential load directly instead of opening the overlay.
 	if inventory_open() then
-		local mag = get_hovered_magazine()
+		local mag = get_hovered_actor_mag()
 		if mag and sequential_load_magazine and sequential_load_magazine.perform_sequential_load then
 			sequential_load_magazine.perform_sequential_load(mag)
 		end
@@ -362,7 +388,7 @@ local function handle_key_dump()
 	end
 	-- Inventory mode: dump magazine under cursor (also handled in inv_keyboard_hook; safe no-op if unfocused).
 	if inventory_open() then
-		local mag = get_hovered_magazine()
+		local mag = get_hovered_actor_mag()
 		if mag and sequential_load_magazine and sequential_load_magazine.dump_mag_order then
 			sequential_load_magazine.dump_mag_order(mag)
 		end
@@ -370,21 +396,29 @@ local function handle_key_dump()
 	end
 
 	-- Weapon mode: inventory closed, configured modifier held, active
-	-- item is a magazine-supporting weapon. Melee / internal-mag weapons
-	-- are filtered out by is_supported_weapon.
+	-- item is a weapon. Two paths:
+	--   * Mags Redux supports it -> dump the attached magazine.
+	--   * Otherwise, if the internal-mag loader recognises it (pump
+	--     shotgun, internal-mag rifle, ...) -> dump the virtual stack.
 	if not modifier_matches() then return end
 
 	local wpn = db.actor:active_item()
 	if not wpn then return end
-	if not (magazine_binder and magazine_binder.is_supported_weapon
-		and magazine_binder.is_supported_weapon(wpn)) then
-		return
-	end
 	if wpn.weapon_in_grenade_mode and wpn:weapon_in_grenade_mode() then
 		return
 	end
-	if sequential_load_magazine and sequential_load_magazine.dump_weapon_mag then
-		sequential_load_magazine.dump_weapon_mag(wpn)
+	if magazine_binder and magazine_binder.is_supported_weapon
+		and magazine_binder.is_supported_weapon(wpn) then
+		if sequential_load_magazine and sequential_load_magazine.dump_weapon_mag then
+			sequential_load_magazine.dump_weapon_mag(wpn)
+		end
+		return
+	end
+	if sequential_load_magazine_internal
+		and sequential_load_magazine_internal.is_eligible_internal_weapon
+		and sequential_load_magazine_internal.is_eligible_internal_weapon(wpn)
+		and sequential_load_magazine_internal.dump_internal then
+		sequential_load_magazine_internal.dump_internal(wpn)
 	end
 end
 

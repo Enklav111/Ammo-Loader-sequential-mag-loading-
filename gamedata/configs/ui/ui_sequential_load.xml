@@ -38,9 +38,10 @@
 			<text complex_mode="1" r="200" g="200" b="200" align="l" vert_align="c" font="letterica18">st_seqload_preset</text>
 		</preset_label>
 
-		<preset_list x="20" y="118" width="580" height="286"
-		             right_ident="0" left_ident="0" top_indent="0" bottom_indent="0"
-		             vert_interval="2" always_show_scroll="0"/>
+		<!-- Preset rows: scroll when more than ~6 lines fit in 286px viewport -->
+		<preset_scroll x="20" y="118" width="580" height="286"
+		               right_ident="0" left_ident="0" top_indent="0" bottom_indent="0"
+		               vert_interval="2" always_show_scroll="0"/>
 
 		<add_combo x="20" y="414" width="380" height="26">
 			<list_font r="170" g="170" b="170" font="letterica16"/>

@@ -1,0 +1,955 @@
+----------------------------------------------------------------
+-- Sequential loading for weapons whose loaded-rounds list is not
+-- a separate Mags Redux magazine: pump shotguns, internal-magazine
+-- rifles, and so on. Also covers EVERY weapon when Mags Redux is
+-- not installed at all.
+--
+-- Strategy:
+--   * `actor_on_weapon_reload` is dispatched only by Mags Redux,
+--     so we cannot rely on it. Instead we poll on `actor_on_update`
+--     and watch the active weapon's ammo_elapsed. Each positive
+--     delta is a load event (a shotgun shell, a clip refill, ...).
+--   * For each load delta we plan delta rounds from the user's
+--     preset cycle (continuing from where the stack left off),
+--     refund the engine-loaded ammo back to the inventory and
+--     pull the desired ammo instead. The stack tracks the actual
+--     round order so the next-shot ammo type can be re-applied.
+--
+-- Mags Redux co-existence
+-- -----------------------
+-- We tell internal vs external magazine weapons apart by
+-- `mag_data.is_weapon` (Mags Redux's own classification, set in
+-- `magazine_binder.create_mag_data`):
+--   * is_weapon=false  -> external magazine attached, Mags Redux
+--                         already handles per-round alternation;
+--                         we skip the weapon entirely.
+--   * is_weapon=true   -> internal magazine, Mags Redux still
+--                         tracks `mag_data.loaded` for the fire
+--                         callback, but does NOT track per-round
+--                         alternation on shell-by-shell reload.
+--                         We share its loaded array (push to it
+--                         directly) and let Mags Redux handle the
+--                         fire-time pop.
+--   * mag_data missing -> Mags Redux is absent or has not classified
+--                         the weapon. We own the stack ourselves and
+--                         pop on actor_on_weapon_fired.
+--
+-- Persistence: per-weapon state survives saves / loads via
+-- save_state / load_state. We only persist what Mags Redux does NOT
+-- already persist (cycle_pos and stack for non-Mags-Redux cases).
+----------------------------------------------------------------
+
+--------------------------------------------------------------------
+-- Debug printing (gated by the existing MCM "Debug" toggle).
+--------------------------------------------------------------------
+local function dbg_enabled()
+	return sequential_load_magazine_mcm and sequential_load_magazine_mcm.DEBUG
+end
+local function dbg(fmt, ...)
+	if dbg_enabled() then
+		printf("[seqload_int] " .. fmt, ...)
+	end
+end
+
+--------------------------------------------------------------------
+-- Per-weapon runtime state
+--   stack       - LIFO array of ammo sections; top = next shot.
+--                 May ALIAS Mags Redux's mag_data.loaded.
+--   mr_managed  - true when stack is Mags Redux's mag_data.loaded.
+--                 In that case we don't pop on fire (Mags Redux does).
+--   last_count  - last seen get_ammo_in_magazine() (for delta detection).
+--   caliber     - cached caliber token (for preset lookup).
+--   cycle_pos   - 1-based position in the expanded preset cycle.
+--   own_stack   - our private stack for save_state when mr_managed.
+--                 Mags Redux already saves mag_data.loaded itself,
+--                 so we just keep our own pointer fresh.
+--------------------------------------------------------------------
+local state_by_id = {}
+
+--------------------------------------------------------------------
+-- Section info caching ---------------------------------------------
+--------------------------------------------------------------------
+
+local section_cache = {}
+
+local function split_csv(s)
+	local out = {}
+	if not s then return out end
+	for token in string.gmatch(s, "([^,%s]+)") do
+		table.insert(out, token)
+	end
+	return out
+end
+
+local function build_section_info(sec)
+	local info = {
+		ammo_list = split_csv(SYS_GetParam(0, sec, "ammo_class") or ""),
+		mag_size  = SYS_GetParam(2, sec, "ammo_mag_size") or 0,
+	}
+	if #info.ammo_list > 0 and sequential_load_magazine
+		and sequential_load_magazine.extract_caliber then
+		info.caliber = sequential_load_magazine.extract_caliber(info.ammo_list[1])
+	end
+	-- Eligible when there is at least one ammo type and the magazine
+	-- holds more than one round (skip single-shot weapons).
+	info.eligible = (#info.ammo_list > 0) and (info.mag_size > 1) and (info.caliber ~= nil)
+	section_cache[sec] = info
+	return info
+end
+
+local function get_section_info(sec)
+	return section_cache[sec] or build_section_info(sec)
+end
+
+--------------------------------------------------------------------
+-- Mags Redux integration -------------------------------------------
+--------------------------------------------------------------------
+
+-- True if the weapon currently has a separate magazine attached,
+-- which Mags Redux handles itself.
+local function has_external_magazine(wpn)
+	if not (magazine_binder and magazine_binder.get_mag_loaded) then
+		return false
+	end
+	local md = magazine_binder.get_mag_loaded(wpn:id())
+	if not md then return false end
+	-- is_weapon=true means the "magazine" IS the weapon itself
+	-- (internal mag); is_weapon=false (or nil) means the weapon
+	-- has a real magazine accessory, which Mags Redux dispatches.
+	return md.is_weapon == false
+end
+
+-- Returns Mags Redux's loaded-stack reference for this weapon if it's
+-- managing the weapon as an internal magazine; otherwise nil.
+local function get_mr_loaded(wpn)
+	if not (magazine_binder and magazine_binder.get_mag_loaded) then
+		return nil
+	end
+	local md = magazine_binder.get_mag_loaded(wpn:id())
+	if md and md.is_weapon and md.loaded then
+		return md.loaded, md
+	end
+	return nil
+end
+
+-- After load_weapon(), mag data sits on the weapon with is_weapon=true but
+-- section = the physical mag item (mag_ak_...). Pump shotguns use their
+-- default_mag section instead - only those get shell-by-shell handling here.
+local function is_merged_magazine_weapon(wpn)
+	if not (magazine_binder and magazine_binder.get_mag_loaded
+		and magazine_binder.weapon_default_magazine) then
+		return false
+	end
+	local md = magazine_binder.get_mag_loaded(wpn:id())
+	if not (md and md.is_weapon and md.section and md.section ~= "no_mag") then
+		return false
+	end
+	local default_mag = magazine_binder.weapon_default_magazine(wpn)
+	if not default_mag then return false end
+	return md.section ~= default_mag
+end
+
+-- Resolve ammo-type index the same way Mags Redux does (utils_item order),
+-- not raw ammo_class CSV order which can disagree on multi-caliber weapons.
+local function resolve_ammo_type_index(wpn, info, sec)
+	if magazines and magazines.get_ammo_map then
+		local amap = magazines.get_ammo_map(wpn:id())
+		if amap and amap[sec] then
+			return amap[sec] - 1
+		end
+	end
+	if utils_item and utils_item.get_ammo then
+		local list = utils_item.get_ammo(wpn:section(), wpn:id())
+		if list then
+			for i, a in ipairs(list) do
+				if a == sec then return i - 1 end
+			end
+		end
+	end
+	for i, a in ipairs(info.ammo_list) do
+		if a == sec then return i - 1 end
+	end
+	return nil
+end
+
+-- Current loaded-round count. X-Ray weapons use get_ammo_in_magazine().
+-- Must be declared before sync_weapon_from_stack / reconcile_stack_count.
+local function get_ammo_count(wpn)
+	return wpn:get_ammo_in_magazine() or 0
+end
+
+-- Write stack changes back to Mags Redux before prep_weapon reads them.
+local function persist_mr_stack(wpn, stack_ref)
+	if not (magazine_binder and magazine_binder.get_mag_loaded and magazine_binder.set_data) then
+		return
+	end
+	local md = magazine_binder.get_mag_loaded(wpn:id())
+	if md and stack_ref then
+		md.loaded = stack_ref
+		magazine_binder.set_data(wpn:id(), md)
+	end
+end
+
+-- Sync chamber type + loaded count with the top of our round stack.
+local function sync_weapon_from_stack(wpn, info, stack_ref, mr_managed)
+	if not (stack_ref and #stack_ref > 0) then return end
+	local top = stack_ref[#stack_ref]
+	if mr_managed then
+		persist_mr_stack(wpn, stack_ref)
+		if magazines and magazines.prep_weapon then
+			pcall(function() magazines.prep_weapon(wpn, false) end)
+		end
+		local idx = resolve_ammo_type_index(wpn, info, top)
+		if idx ~= nil then
+			wpn:set_ammo_type(idx)
+		end
+		return
+	end
+	local idx = resolve_ammo_type_index(wpn, info, top)
+	if idx == nil then return end
+	wpn:set_ammo_type(idx)
+	if type(wpn.set_ammo_elapsed) == "function" then
+		wpn:set_ammo_elapsed(get_ammo_count(wpn))
+	end
+end
+
+--------------------------------------------------------------------
+-- Eligibility ------------------------------------------------------
+--------------------------------------------------------------------
+
+-- A weapon is handled by THIS loader when:
+--   * it's a weapon (IsWeapon),
+--   * the Lua proxy exposes get_ammo_in_magazine / set_ammo_type (NOT
+--     get_ammo_elapsed - absent on many weapon proxies including pump
+--     shotguns; requiring it silently excluded them from this loader).
+--   * not currently in grenade-launcher mode,
+--   * does NOT have an external magazine attached (Mags Redux will
+--     dispatch external mags itself),
+--   * its section has ammo_class and ammo_mag_size > 1.
+function is_eligible_internal_weapon(wpn)
+	if not wpn or not IsWeapon(wpn) then return false end
+	if type(wpn.get_ammo_in_magazine) ~= "function"
+		or type(wpn.get_ammo_type)       ~= "function"
+		or type(wpn.set_ammo_type)       ~= "function"
+		or type(wpn.id)                  ~= "function"
+		or type(wpn.section)             ~= "function"
+	then
+		return false
+	end
+	if type(wpn.weapon_in_grenade_mode) == "function" and wpn:weapon_in_grenade_mode() then
+		return false
+	end
+	if has_external_magazine(wpn) then
+		return false
+	end
+	if is_merged_magazine_weapon(wpn) then
+		return false
+	end
+	local info = get_section_info(wpn:section())
+	return info.eligible == true
+end
+
+local function mcm_internal_enabled()
+	if not sequential_load_magazine_mcm then return true end
+	return sequential_load_magazine_mcm.INTERNAL_MAG_ENABLED ~= false
+end
+
+--------------------------------------------------------------------
+-- Inventory helpers ------------------------------------------------
+--------------------------------------------------------------------
+
+local function snapshot_inventory(ammo_secs)
+	local stock = {}
+	local boxes = {}
+	local set = {}
+	for _, sec in ipairs(ammo_secs) do
+		stock[sec] = 0
+		boxes[sec] = {}
+		set[sec] = true
+	end
+	if not db.actor then return stock, boxes end
+	db.actor:iterate_inventory(function(_, item)
+		local sec = item:section()
+		if set[sec] then
+			table.insert(boxes[sec], item)
+			stock[sec] = stock[sec] + (item:ammo_get_count() or 0)
+		end
+	end)
+	return stock, boxes
+end
+
+local function take_from_boxes(boxes_for_sec, n)
+	local left = n
+	while left > 0 and #boxes_for_sec > 0 do
+		local box = boxes_for_sec[1]
+		local cnt = box:ammo_get_count() or 0
+		if cnt > left then
+			box:ammo_set_count(cnt - left)
+			return n
+		elseif cnt > 0 then
+			alife_release_id(box:id())
+			table.remove(boxes_for_sec, 1)
+			left = left - cnt
+		else
+			table.remove(boxes_for_sec, 1)
+		end
+	end
+	return n - left
+end
+
+local function take_from_inventory(sec, n)
+	if not (db.actor and sec and n and n > 0) then return 0 end
+	local boxes = {}
+	db.actor:iterate_inventory(function(_, item)
+		if item:section() == sec then
+			table.insert(boxes, item)
+		end
+	end)
+	return take_from_boxes(boxes, n)
+end
+
+local function refund_ammo(sec, n)
+	if not (db.actor and sec and n and n > 0) then return end
+	local max_stack = SYS_GetParam(2, sec, "box_size") or 0
+	if max_stack <= 0 then max_stack = 30 end
+	local remaining = n
+	db.actor:iterate_inventory(function(_, item)
+		if remaining <= 0 then return end
+		if item:section() == sec then
+			local cur = item:ammo_get_count() or 0
+			if cur < max_stack then
+				local can = max_stack - cur
+				local add = math.min(can, remaining)
+				item:ammo_set_count(cur + add)
+				remaining = remaining - add
+			end
+		end
+	end)
+	if remaining > 0 then
+		alife_create_item(sec, db.actor, { ammo = remaining })
+	end
+end
+
+-- Refunds are deferred until reload animation settles; immediate
+-- alife_create_item during reload often spawns stacks at the player's feet.
+local function queue_refunds(s, refund_counts)
+	if not refund_counts then return end
+	s.pending_refunds = s.pending_refunds or {}
+	for sec, n in pairs(refund_counts) do
+		if n and n > 0 then
+			s.pending_refunds[sec] = (s.pending_refunds[sec] or 0) + n
+		end
+	end
+end
+
+local function flush_pending_refunds(s)
+	if not s.pending_refunds then return end
+	for sec, n in pairs(s.pending_refunds) do
+		if n and n > 0 then
+			refund_ammo(sec, n)
+		end
+	end
+	s.pending_refunds = nil
+end
+
+local function schedule_refund_flush(wpn_id, s)
+	-- Re-schedule on every load delta so a long reload (60 rounds)
+	-- flushes once after the last round, not mid-animation.
+	CreateTimeEvent("seqload_int", "refund_" .. tostring(wpn_id), 0.15, function()
+		if state_by_id[wpn_id] == s then
+			flush_pending_refunds(s)
+		end
+		return true
+	end)
+end
+
+--------------------------------------------------------------------
+-- ammo_class index <-> ammo section
+--------------------------------------------------------------------
+
+local function ammo_index(ammo_list, sec)
+	for i, a in ipairs(ammo_list) do
+		if a == sec then return i - 1 end
+	end
+	return nil
+end
+
+local function ammo_section_at(ammo_list, idx)
+	return ammo_list[idx + 1]
+end
+
+local function get_engine_sec(wpn, info)
+	local idx = wpn:get_ammo_type() or 0
+	if utils_item and utils_item.get_ammo then
+		local list = utils_item.get_ammo(wpn:section(), wpn:id())
+		if list and list[idx + 1] then return list[idx + 1] end
+	end
+	return ammo_section_at(info.ammo_list, idx)
+end
+
+local function apply_top_of_stack(wpn, info, stack, mr_managed)
+	sync_weapon_from_stack(wpn, info, stack, mr_managed)
+end
+
+--------------------------------------------------------------------
+-- Preset resolution ------------------------------------------------
+--------------------------------------------------------------------
+
+local function get_preset_for_caliber(cal)
+	if not (cal and sequential_load_magazine and sequential_load_magazine.get_preset) then
+		return nil
+	end
+	return sequential_load_magazine.get_preset(cal)
+end
+
+local function is_bad(sec)
+	return sequential_load_magazine and sequential_load_magazine.is_bad_ammo
+		and sequential_load_magazine.is_bad_ammo(sec)
+end
+
+local function ignore_bad()
+	return sequential_load_magazine_mcm and sequential_load_magazine_mcm.IGNORE_BAD
+end
+
+local function filter_preset_for_weapon(preset, info)
+	if not preset then return {} end
+	local set = {}
+	for _, a in ipairs(info.ammo_list) do set[a] = true end
+	local out = {}
+	for _, e in ipairs(preset) do
+		if e.ammo and set[e.ammo] and (e.count or 1) > 0 then
+			local skip = ignore_bad() and is_bad(e.ammo)
+			if not skip then
+				table.insert(out, { ammo = e.ammo, count = e.count or 1 })
+			end
+		end
+	end
+	return out
+end
+
+-- Same fallback as the magazine path: alphabetical, 1 each.
+local function build_default_preset_for_weapon(info)
+	local sorted = {}
+	for _, a in ipairs(info.ammo_list) do
+		if not (ignore_bad() and is_bad(a)) then
+			table.insert(sorted, a)
+		end
+	end
+	table.sort(sorted)
+	local out = {}
+	for _, a in ipairs(sorted) do
+		table.insert(out, { ammo = a, count = 1 })
+	end
+	return out
+end
+
+local function resolve_effective_preset(s, info)
+	local preset = filter_preset_for_weapon(
+		get_preset_for_caliber(s.caliber or info.caliber), info)
+	if #preset == 0 then
+		preset = build_default_preset_for_weapon(info)
+	end
+	return preset
+end
+
+--------------------------------------------------------------------
+-- Reload (positive ammo_elapsed delta) handling --------------------
+--------------------------------------------------------------------
+
+-- Push `delta` rounds of `ammo` onto the stack (Mags Redux stack.push when available).
+local function push_rounds(stack_ref, ammo, delta)
+	for _ = 1, delta do
+		if stack and stack.push then
+			stack.push(stack_ref, ammo)
+		else
+			table.insert(stack_ref, ammo)
+		end
+	end
+end
+
+-- Pick the next ammo section from the preset cycle, skipping types with
+-- no stock unless it is the type the engine just loaded (engine_sec).
+local function pop_one_round(stack_ref)
+	if stack and stack.pop then
+		return stack.pop(stack_ref)
+	end
+	return table.remove(stack_ref)
+end
+
+-- Keep our stack length aligned with the engine round counter.
+local function reconcile_stack_count(wpn, info, s)
+	if not (s and s.stack and not s.mr_managed) then return end
+	local cur = get_ammo_count(wpn)
+	while #s.stack > cur do
+		pop_one_round(s.stack)
+	end
+	while #s.stack < cur do
+		local sec = get_engine_sec(wpn, info) or info.ammo_list[1]
+		if sec then push_rounds(s.stack, sec, 1) end
+	end
+end
+
+-- If the currently selected ammo type is empty but other preset types
+-- remain, switch the weapon so the engine can continue reloading.
+local function ensure_reload_ammo_available(wpn, info, s)
+	if not mcm_internal_enabled() then return end
+
+	local cur_sec = get_engine_sec(wpn, info)
+	if not cur_sec then return end
+
+	local stock, _ = snapshot_inventory(info.ammo_list)
+	if (stock[cur_sec] or 0) > 0 then return end
+
+	local preset = resolve_effective_preset(s, info)
+	if #preset == 0 then return end
+
+	local cycle = sequential_load_magazine.expand_cycle(preset)
+	if not cycle or #cycle == 0 then return end
+
+	local cycle_len = #cycle
+	local pos = s.cycle_pos or 1
+	for _ = 1, cycle_len do
+		local sec = cycle[pos]
+		if sec and (stock[sec] or 0) > 0 then
+			local idx = resolve_ammo_type_index(wpn, info, sec)
+			if idx ~= nil then
+				wpn:set_ammo_type(idx)
+				dbg("switched reload ammo %s -> %s (stock depleted)", tostring(cur_sec), sec)
+				return
+			end
+		end
+		pos = (pos % cycle_len) + 1
+	end
+end
+
+-- Vanilla force_unload_magazine(true) refunds every round as the selected
+-- ammo type. When engine_already_spawned is true we strip those spurious
+-- rounds; when false the caller must clear the weapon without calling
+-- force_unload(true) (our inventory unload hook uses that path).
+local function handle_unload_delta(wpn, info, s, delta, engine_already_spawned)
+	if delta <= 0 then return end
+
+	local engine_sec = get_engine_sec(wpn, info) or info.ammo_list[1]
+	local refunds = {}
+
+	for _ = 1, delta do
+		local sec = (#s.stack > 0) and pop_one_round(s.stack) or engine_sec
+		if sec then
+			refunds[sec] = (refunds[sec] or 0) + 1
+		end
+	end
+
+	local cur = get_ammo_count(wpn)
+	while #s.stack > cur do
+		pop_one_round(s.stack)
+	end
+
+	if s.mr_managed and magazine_binder and magazine_binder.set_data then
+		local md = magazine_binder.get_mag_loaded(wpn:id())
+		if md then
+			md.loaded = s.stack
+			magazine_binder.set_data(wpn:id(), md)
+		end
+	end
+
+	if not mcm_internal_enabled() then return end
+
+	if engine_already_spawned then
+		local removed = take_from_inventory(engine_sec, delta)
+		if removed < delta then
+			dbg("unload: removed only %d/%d x %s (vanilla refund)", removed, delta, tostring(engine_sec))
+		end
+	end
+
+	for sec, n in pairs(refunds) do
+		refund_ammo(sec, n)
+	end
+
+	dbg("unload delta=%d, engine_strip=%s, stack refund", delta, tostring(engine_already_spawned))
+end
+
+-- Empty the weapon mag without spawning ammo into inventory.
+local function clear_weapon_magazine(wpn)
+	if type(wpn.set_ammo_elapsed) == "function" then
+		wpn:set_ammo_elapsed(0)
+	end
+	pcall(function()
+		if type(wpn.force_unload_magazine) == "function" then
+			wpn:force_unload_magazine(false)
+		end
+	end)
+end
+
+-- Pick the next ammo section from the preset cycle, skipping types with
+-- no inventory stock. Uses the shared planner from the magazine loader.
+local function plan_one_round(cycle, pos, stock)
+	if sequential_load_magazine and sequential_load_magazine.plan_cycle_advance then
+		local planned, next_pos = sequential_load_magazine.plan_cycle_advance(
+			cycle, pos, 1, stock)
+		if #planned > 0 then
+			return planned[1], next_pos
+		end
+	end
+	return nil, pos or 1
+end
+
+local function handle_load_delta(wpn, info, s, delta)
+	if delta <= 0 then return end
+
+	local engine_sec = get_engine_sec(wpn, info) or info.ammo_list[1]
+
+	-- Feature gate: when disabled, just track stack length with the
+	-- engine-loaded ammo so post-fire pop is consistent. No refunds.
+	if not mcm_internal_enabled() then
+		push_rounds(s.stack, engine_sec, delta)
+		dbg("feature off: pushed %d x %s (stack=%d)", delta, tostring(engine_sec), #s.stack)
+		return
+	end
+
+	local preset = resolve_effective_preset(s, info)
+	if #preset == 0 then
+		push_rounds(s.stack, engine_sec, delta)
+		dbg("no preset and no default: pushed %d x %s", delta, tostring(engine_sec))
+		return
+	end
+
+	local cycle = sequential_load_magazine.expand_cycle(preset)
+	if not cycle or #cycle == 0 then
+		push_rounds(s.stack, engine_sec, delta)
+		dbg("empty cycle: pushed %d x %s", delta, tostring(engine_sec))
+		return
+	end
+
+	-- Plan all rounds first, then batch inventory changes so a full
+	-- mag reload does not spawn dozens of separate ammo stacks.
+	local stock, boxes = snapshot_inventory(info.ammo_list)
+	local sim_stock = {}
+	for k, v in pairs(stock) do sim_stock[k] = v end
+	-- Engine already pulled delta rounds of engine_sec into the weapon;
+	-- credit them so the planner can assign them when the cycle matches.
+	sim_stock[engine_sec] = (sim_stock[engine_sec] or 0) + delta
+
+	local planned_rounds = {}
+	local refund_counts = {}
+	local take_counts = {}
+
+	for _ = 1, delta do
+		local desired, next_pos = plan_one_round(cycle, s.cycle_pos, sim_stock)
+		s.cycle_pos = next_pos
+		if not desired then
+			desired = engine_sec
+		end
+		table.insert(planned_rounds, desired)
+		if desired ~= engine_sec then
+			take_counts[desired] = (take_counts[desired] or 0) + 1
+			refund_counts[engine_sec] = (refund_counts[engine_sec] or 0) + 1
+		end
+	end
+
+	for sec, n in pairs(take_counts) do
+		take_from_boxes(boxes[sec] or {}, n)
+	end
+	queue_refunds(s, refund_counts)
+	if refund_counts and next(refund_counts) then
+		schedule_refund_flush(wpn:id(), s)
+	end
+	for _, ammo in ipairs(planned_rounds) do
+		push_rounds(s.stack, ammo, 1)
+	end
+
+	reconcile_stack_count(wpn, info, s)
+	sync_weapon_from_stack(wpn, info, s.stack, s.mr_managed)
+	dbg("loaded delta=%d, top=%s, stack=%d, cycle_pos=%d, mr=%s",
+		delta, tostring(s.stack[#s.stack]), #s.stack, s.cycle_pos, tostring(s.mr_managed))
+end
+
+--------------------------------------------------------------------
+-- State management -------------------------------------------------
+--------------------------------------------------------------------
+
+local function ensure_state(wpn, info)
+	local id = wpn:id()
+	local s = state_by_id[id]
+
+	-- Ensure Mags Redux has created mag_data for supported internal-mag
+	-- weapons before we try to alias its loaded stack.
+	if magazine_binder and magazine_binder.is_supported_weapon then
+		magazine_binder.is_supported_weapon(wpn)
+	end
+
+	-- Resolve the live stack: prefer Mags Redux's mag_data.loaded so
+	-- our pushes flow through Mags Redux's existing fire callback.
+	local mr_loaded = get_mr_loaded(wpn)
+
+	if not s then
+		s = {
+			stack       = mr_loaded or {},
+			mr_managed  = mr_loaded ~= nil,
+			last_count  = get_ammo_count(wpn),
+			caliber     = info.caliber,
+			cycle_pos   = 1,
+			ammo_synced = true,
+		}
+		state_by_id[id] = s
+		dbg("new state for id=%d, mr_managed=%s, mag_size=%d, ammo_list=%d, caliber=%s, ammo=%d",
+			id, tostring(s.mr_managed), info.mag_size,
+			#info.ammo_list, tostring(info.caliber), s.last_count)
+	else
+		s.caliber = s.caliber or info.caliber
+		s.cycle_pos = s.cycle_pos or 1
+		if mr_loaded and s.stack ~= mr_loaded then
+			s.stack = mr_loaded
+			s.mr_managed = true
+			s.ammo_synced = false
+			dbg("rebound to Mags Redux loaded for id=%d", id)
+		elseif not mr_loaded and s.mr_managed then
+			s.stack = {}
+			s.mr_managed = false
+			s.ammo_synced = false
+			dbg("Mags Redux loaded vanished for id=%d; switched to standalone", id)
+		end
+	end
+	return s
+end
+
+--------------------------------------------------------------------
+-- Polling ----------------------------------------------------------
+--------------------------------------------------------------------
+
+local function actor_on_update_impl()
+	if not db.actor then return end
+	local wpn = db.actor:active_item()
+	if not wpn then return end
+	if not is_eligible_internal_weapon(wpn) then return end
+
+	local info = get_section_info(wpn:section())
+	local s = ensure_state(wpn, info)
+
+	-- First frame after equip / load / stack rebind: baseline the counter
+	-- without treating existing rounds as a reload (prevents false refunds).
+	if not s.ammo_synced then
+		s.last_count = get_ammo_count(wpn)
+		s.ammo_synced = true
+		reconcile_stack_count(wpn, info, s)
+		sync_weapon_from_stack(wpn, info, s.stack, s.mr_managed)
+		return
+	end
+
+	local cur = get_ammo_count(wpn)
+	local prev = s.last_count or cur
+
+	if cur > prev then
+		handle_load_delta(wpn, info, s, cur - prev)
+	elseif cur < prev then
+		local drop = prev - cur
+		local skip_unload = s.unload_skip_drop or 0
+		local fired_pending = s.fire_drops_pending or 0
+		if skip_unload > 0 then
+			s.unload_skip_drop = skip_unload - math.min(drop, skip_unload)
+		elseif fired_pending > 0 then
+			-- Shot(s): standalone stack already popped in actor_on_weapon_fired.
+			local consume = math.min(drop, fired_pending)
+			s.fire_drops_pending = fired_pending - consume
+			reconcile_stack_count(wpn, info, s)
+			sync_weapon_from_stack(wpn, info, s.stack, s.mr_managed)
+		else
+			-- External unload (not our hook): vanilla may have spawned wrong type.
+			handle_unload_delta(wpn, info, s, drop, true)
+		end
+	end
+
+	if cur < info.mag_size then
+		ensure_reload_ammo_available(wpn, info, s)
+	end
+
+	s.last_count = get_ammo_count(wpn)
+end
+
+-- pcall wrapper: this runs every frame on a wide variety of weapon proxies
+-- (mods, custom classes, edge-case objects). If anything raises - log it
+-- once per error and stay silent afterwards, so the game doesn't crash.
+local _logged_errors = {}
+local function actor_on_update()
+	local ok, err = pcall(actor_on_update_impl)
+	if not ok and err and not _logged_errors[err] then
+		_logged_errors[err] = true
+		printf("[seqload_int] actor_on_update error (suppressed afterwards): %s", tostring(err))
+	end
+end
+
+--------------------------------------------------------------------
+-- Fire callback ----------------------------------------------------
+--------------------------------------------------------------------
+
+local function actor_on_weapon_fired_impl(actor, wpn)
+	if not wpn then return end
+	if not is_eligible_internal_weapon(wpn) then return end
+	local info = get_section_info(wpn:section())
+	local s = state_by_id[wpn:id()]
+	if not s then return end
+
+	-- Mags Redux owns the stack for mr_managed weapons and pops it
+	-- in its own actor_on_weapon_fired. We must NOT double-pop.
+	if s.mr_managed then
+		s.last_count = get_ammo_count(wpn)
+		s.fire_drops_pending = (s.fire_drops_pending or 0) + 1
+		-- Defer: Mags pops the stack in its callback; sync chamber after.
+		local wpn_id = wpn:id()
+		CreateTimeEvent("seqload_int", "chamber_" .. tostring(wpn_id), 0.05, function()
+			local w = level.object_by_id(wpn_id)
+			local st = w and state_by_id[wpn_id]
+			if w and st then
+				sync_weapon_from_stack(w, get_section_info(w:section()), st.stack, st.mr_managed)
+			end
+			return true
+		end)
+		return
+	end
+
+	if #s.stack > 0 then
+		pop_one_round(s.stack)
+	end
+	reconcile_stack_count(wpn, info, s)
+	s.last_count = get_ammo_count(wpn)
+	s.fire_drops_pending = (s.fire_drops_pending or 0) + 1
+	-- Engine chamber type updates after the shot animation; sync twice.
+	sync_weapon_from_stack(wpn, info, s.stack, s.mr_managed)
+	local wpn_id = wpn:id()
+	CreateTimeEvent("seqload_int", "chamber_" .. tostring(wpn_id), 0.05, function()
+		local w = level.object_by_id(wpn_id)
+		local st = w and state_by_id[wpn_id]
+		if w and st and st.stack and #st.stack > 0 then
+			sync_weapon_from_stack(w, get_section_info(w:section()), st.stack, st.mr_managed)
+		end
+		return true
+	end)
+end
+
+local function actor_on_weapon_fired(actor, wpn)
+	local ok, err = pcall(actor_on_weapon_fired_impl, actor, wpn)
+	if not ok and err and not _logged_errors[err] then
+		_logged_errors[err] = true
+		printf("[seqload_int] actor_on_weapon_fired error (suppressed afterwards): %s", tostring(err))
+	end
+end
+
+--------------------------------------------------------------------
+-- Save / load ------------------------------------------------------
+--------------------------------------------------------------------
+
+local function save_state(mdata)
+	-- Persist standalone (no-Mags-Redux) stacks and cycle_pos.
+	-- mr_managed stacks are persisted by Mags Redux itself.
+	local out = {}
+	for id, s in pairs(state_by_id) do
+		if not s.mr_managed and s.stack and #s.stack > 0 then
+			out[tostring(id)] = { stack = s.stack, cycle_pos = s.cycle_pos or 1 }
+		elseif s.mr_managed then
+			out[tostring(id)] = { cycle_pos = s.cycle_pos or 1 }
+		end
+	end
+	mdata.seqload_internal = out
+end
+
+local function load_state(mdata)
+	state_by_id = {}
+	local d = mdata and mdata.seqload_internal
+	if not d then return end
+	for id_str, entry in pairs(d) do
+		local id = tonumber(id_str)
+		if id and entry then
+			state_by_id[id] = {
+				stack       = entry.stack or {},
+				mr_managed  = entry.stack == nil,
+				cycle_pos   = entry.cycle_pos or 1,
+				last_count  = 0,
+				ammo_synced = false,
+			}
+		end
+	end
+end
+
+--------------------------------------------------------------------
+-- Debug dump -------------------------------------------------------
+--------------------------------------------------------------------
+
+local MSG_NL      = "\\n"
+local TIP_AMBER   = "%c[255,255,200,100]"
+local TIP_DEFAULT = "%c[default]"
+
+function dump_internal(wpn)
+	if not (wpn and is_eligible_internal_weapon(wpn)) then return end
+	if not (sequential_load_magazine and sequential_load_magazine.build_dump_text) then return end
+	local info = get_section_info(wpn:section())
+	local s = ensure_state(wpn, info)
+	reconcile_stack_count(wpn, info, s)
+	local header = game.translate_string(ui_item.get_sec_name(wpn:section()))
+	local text = sequential_load_magazine.build_dump_text(header, s and s.stack or nil, wpn)
+	news_manager.send_tip(db.actor, text, nil, "swiss_knife", 8000)
+end
+
+--------------------------------------------------------------------
+-- Inventory unload hook (context menu "Unload magazine") -----------
+--------------------------------------------------------------------
+
+local inv_unload_chain = nil
+
+local function seqload_inventory_unload_weapon(wpn)
+	if not (wpn and is_eligible_internal_weapon(wpn)) then return false end
+	if not mcm_internal_enabled() then return false end
+
+	local info = get_section_info(wpn:section())
+	local s = ensure_state(wpn, info)
+	local prev = get_ammo_count(wpn)
+	if prev <= 0 then return true end
+
+	-- Do NOT call force_unload_magazine(true): it spawns `prev` rounds of the
+	-- selected ammo type on top of our stack-based refund (double unload).
+	handle_unload_delta(wpn, info, s, prev, false)
+	clear_weapon_magazine(wpn)
+	s.last_count = get_ammo_count(wpn)
+	s.ammo_synced = true
+	s.unload_skip_drop = prev
+	return true
+end
+
+local function inv_action_unload_hook(self, obj, bag)
+	obj = self:CheckItem(obj, "Action_Unload")
+	if obj and seqload_inventory_unload_weapon(obj) then
+		self:On_Item_Update()
+		return
+	end
+	return inv_unload_chain(self, obj, bag)
+end
+
+local function try_install_inv_unload_hook()
+	if not (ui_inventory and ui_inventory.UIInventory) then return end
+	local current = ui_inventory.UIInventory.Action_Unload
+	if current == inv_action_unload_hook then return end
+	inv_unload_chain = current
+	ui_inventory.UIInventory.Action_Unload = inv_action_unload_hook
+end
+
+--------------------------------------------------------------------
+-- Lifecycle --------------------------------------------------------
+--------------------------------------------------------------------
+
+function on_game_start()
+	RegisterScriptCallback("actor_on_update",       actor_on_update)
+	RegisterScriptCallback("actor_on_weapon_fired", actor_on_weapon_fired)
+	RegisterScriptCallback("save_state",            save_state)
+	RegisterScriptCallback("load_state",            load_state)
+	RegisterScriptCallback("GUI_on_show", function()
+		if _GUIs and _GUIs["UIInventory"] then
+			try_install_inv_unload_hook()
+		end
+	end)
+	CreateTimeEvent("seqload_int", "inv_unload_hook", 0, function()
+		try_install_inv_unload_hook()
+		return true
+	end)
+	CreateTimeEvent("seqload_int", "inv_unload_hook_late", 1.0, function()
+		try_install_inv_unload_hook()
+		return true
+	end)
+end

@@ -98,6 +98,15 @@ local HIDDEN_FROM_DEFAULT = {
 	["pkm"] = true,
 }
 
+-- Caliber tokens that are NOT firearm ammunition (devices, knives, etc.).
+local EXCLUDED_CALIBERS = {
+	["batteries"] = true,
+	["binoc"]     = true,
+	["dyno"]      = true,
+	["knife"]     = true,
+	["bolt"]      = true,
+}
+
 -- Extract caliber token without applying aliases.
 -- Examples: ammo_5.45x39_fmj -> 5.45x39 ; ammo_12x70_buck -> 12x70 ;
 -- ammo_gauss -> gauss ; ammo_pkm_100 -> pkm
@@ -118,6 +127,31 @@ function extract_caliber(ammo_section)
 	return raw
 end
 
+local function is_excluded_caliber(cal)
+	return cal and EXCLUDED_CALIBERS[cal] == true
+end
+
+local function is_excluded_ammo(sec)
+	if not sec then return true end
+	local raw = extract_caliber_raw(sec)
+	if raw and EXCLUDED_CALIBERS[raw] then return true end
+	return false
+end
+
+-- Weapons whose ammo_class should never appear in the preset UI.
+-- Match by section name only (not LTX fields like shell_bone = bolt).
+local function is_excluded_weapon(sec)
+	if not sec then return true end
+	local s = sec:lower()
+	if s:find("knife", 1, true) then return true end
+	if s:find("binoc", 1, true) then return true end
+	if s == "wpn_bolt" or s:match("^wpn_bolt_") then return true end
+	if s:find("device", 1, true) then return true end
+	local ammo_class = SYS_GetParam(0, sec, "ammo_class") or ""
+	if ammo_class == "" then return true end
+	return false
+end
+
 -- "Damaged" ammo in GAMMA is marked by a suffix on the section name.
 function is_bad_ammo(sec)
 	if not sec then return false end
@@ -132,26 +166,72 @@ local function instant_enabled()
 	return sequential_load_magazine_mcm and sequential_load_magazine_mcm.INSTANT_LOAD
 end
 
+-- "Show post-load summary tip" toggle (MCM tip_after_load). Default ON
+-- if the MCM module hasn't loaded yet (e.g. very first frame).
+local function tip_after_load_enabled()
+	if not sequential_load_magazine_mcm then return true end
+	return sequential_load_magazine_mcm.TIP_AFTER_LOAD ~= false
+end
+
 local caliber_cache = nil     -- sorted array of caliber strings
 local ammo_by_caliber = nil   -- {caliber = sorted array of ammo sections}
 
-local function build_caliber_index()
-	if caliber_cache then return end
+local function split_csv(s)
+	local out = {}
+	if not s then return out end
+	for token in string.gmatch(s, "([^,%s]+)") do
+		table.insert(out, token)
+	end
+	return out
+end
 
-	local all_ammo = GetItemList("ammo") or {}
-	local tmp = {}
+local function hide_single_caliber_enabled()
+	if not sequential_load_magazine_mcm then return true end
+	return sequential_load_magazine_mcm.HIDE_SINGLE_CALIBER ~= false
+end
 
-	for sec, _ in pairs(all_ammo) do
-		local cal = extract_caliber(sec)
-		-- Only include ammo types that have at least one compatible magazine.
-		-- This filters out shell ammos without mag support etc.
-		if cal and magazine_binder and magazine_binder.get_basetypes_by_ammo_type
-			and magazine_binder.get_basetypes_by_ammo_type(sec)
-		then
-			tmp[cal] = tmp[cal] or {}
-			table.insert(tmp[cal], sec)
+function reset_caliber_cache()
+	caliber_cache = nil
+	ammo_by_caliber = nil
+end
+
+local function add_ammo_to_index(tmp, ammo_sec)
+	if is_excluded_ammo(ammo_sec) then return end
+	local cal = extract_caliber(ammo_sec)
+	if not cal or is_excluded_caliber(cal) then return end
+	tmp[cal] = tmp[cal] or {}
+	for _, a in ipairs(tmp[cal]) do
+		if a == ammo_sec then return end
+	end
+	table.insert(tmp[cal], ammo_sec)
+end
+
+local function supplement_calibers_from_weapons(tmp)
+	local all_wpn = GetItemList("wpn") or {}
+	for sec, _ in pairs(all_wpn) do
+		if not is_excluded_weapon(sec) then
+			for _, ammo_sec in ipairs(split_csv(SYS_GetParam(0, sec, "ammo_class") or "")) do
+				add_ammo_to_index(tmp, ammo_sec)
+			end
 		end
 	end
+end
+
+local function build_caliber_index()
+	-- Empty {} is truthy in Lua; use nil sentinel so a failed first build
+	-- (binder not ready yet) can be retried later.
+	if caliber_cache ~= nil then return end
+
+	local tmp = {}
+
+	-- Index every non-junk ammo section; do not require Mags basetype lookup
+	-- (that gate emptied the UI when binder was late or incomplete).
+	for sec, _ in pairs(GetItemList("ammo") or {}) do
+		add_ammo_to_index(tmp, sec)
+	end
+
+	-- Also pull ammo_class from weapons (covers modded / odd entries).
+	supplement_calibers_from_weapons(tmp)
 
 	caliber_cache = {}
 	ammo_by_caliber = {}
@@ -176,10 +256,28 @@ end
 
 function get_all_calibers()
 	build_caliber_index()
-	-- A caliber stays in the list even if all its variants are "bad":
-	-- the player might want to edit preset, and would otherwise have
-	-- to toggle the MCM flag off just to see the caliber exists.
-	return caliber_cache or {}
+	-- Binder / GetItemList may not be ready on the very first call.
+	if caliber_cache ~= nil and #caliber_cache == 0 then
+		caliber_cache = nil
+		ammo_by_caliber = nil
+		build_caliber_index()
+	end
+	local all = caliber_cache or {}
+	if not hide_single_caliber_enabled() then
+		return all
+	end
+	local out = {}
+	for _, cal in ipairs(all) do
+		if #filter_bad(ammo_by_caliber[cal] or {}) > 1 then
+			table.insert(out, cal)
+		end
+	end
+	-- Never return an empty dropdown when calibers exist but were all
+	-- single-type (hide-single filter would hide everything).
+	if #out == 0 and #all > 0 then
+		return all
+	end
+	return out
 end
 
 function get_ammos_for_caliber(caliber)
@@ -285,7 +383,7 @@ local function filter_preset_for_mag(preset, mag)
 end
 
 -- Expand preset into a flat cycle: [{A,3},{B,1}] -> {A,A,A,B}
-local function expand_cycle(preset)
+function expand_cycle(preset)
 	local cycle = {}
 	for _, e in ipairs(preset) do
 		for _ = 1, (e.count or 1) do
@@ -296,41 +394,112 @@ local function expand_cycle(preset)
 end
 
 --------------------------------------------------------------------
+-- Plan N rounds from a cycle, advancing through the preset and
+-- skipping ammo types whose available stock has run out.
+--   cycle      - flat preset cycle from expand_cycle()
+--   start_pos  - 1-based starting index inside the cycle (continuation)
+--   count      - max rounds to plan
+--   stock      - mutable {sec = remaining_count} table; the helper
+--                decrements each entry it consumes. Caller may pass a
+--                shallow copy if it wants to preserve the original.
+-- Returns:
+--   planned    - array of ammo sections (length <= count)
+--   next_pos   - cycle position to resume from on the next call
+--                (already advanced past the last consumed slot)
+-- The walk stops early if a full sweep of the cycle finds no ammo
+-- with stock left.
+--------------------------------------------------------------------
+function plan_cycle_advance(cycle, start_pos, count, stock)
+	local planned = {}
+	local cycle_len = cycle and #cycle or 0
+	if cycle_len == 0 or not count or count <= 0 then
+		return planned, start_pos or 1
+	end
+	local pos = ((start_pos or 1) - 1) % cycle_len + 1
+	local taken = 0
+	while taken < count do
+		local round_taken = false
+		for _ = 1, cycle_len do
+			local ammo = cycle[pos]
+			local remaining = stock and stock[ammo] or 0
+			if remaining and remaining > 0 then
+				table.insert(planned, ammo)
+				if stock then stock[ammo] = remaining - 1 end
+				pos = (pos % cycle_len) + 1
+				taken = taken + 1
+				round_taken = true
+				break
+			end
+			pos = (pos % cycle_len) + 1
+		end
+		if not round_taken then break end
+	end
+	return planned, pos
+end
+
+--------------------------------------------------------------------
 -- "Loaded N rounds" tip: first line = total; optional coloured lines
 -- with per-ammo-type counts (one orange block, "\\n" between rows).
 --------------------------------------------------------------------
 
+--------------------------------------------------------------------
+-- News tip line break + colour tokens (shared by zarządka tip and dump)
+--------------------------------------------------------------------
 -- Anomaly news_manager treats the two-char sequence \ + n (Lua "\\n")
--- as a line break. Real U+0A in this path is lost and lines glue together.
--- For multi-line coloured text, use ONE %c[colour] for the block and "\\n"
--- only inside it; repeating %c[default]…%c[colour] per line breaks newlines.
-local MSG_NL = "\\n"
--- Match dump remainder amber (st_seqload / debug tips).
-local TIP_LOAD_TYPE_COLOR = "%c[255,255,200,100]"
-local TIP_LOAD_TYPE_END   = "%c[default]"
+-- as a line break. Real U+0A is lost in this path. For multi-line
+-- coloured blocks: one %c[A,R,G,B] at the start, "\\n" between rows,
+-- one %c[default] at the end (repeating %c[default]…%c[colour] per
+-- row prevents the newlines from rendering).
+local MSG_NL      = "\\n"
+local TIP_AMBER   = "%c[255,255,200,100]"
+local TIP_ORANGE  = "%c[255,255,165,70]"
+local TIP_DEFAULT = "%c[default]"
 
-local function build_loaded_rounds_tip_text(total, tally_by_sec)
-	local first = string.format(game.translate_string("st_seqload_loaded"), tostring(total))
-	if not tally_by_sec then
-		return first
+-- Tally rounds in a Mags Redux mag_data.loaded array by ammo section.
+-- Returns array { {sec=..., n=...}, ... } sorted alphabetically by sec.
+-- Used by post-load tip, debug dump and item tooltip injector.
+local function tally_loaded_sorted(loaded)
+	if not loaded or #loaded == 0 then return {} end
+	local t = {}
+	for _, sec in ipairs(loaded) do
+		t[sec] = (t[sec] or 0) + 1
 	end
 	local rows = {}
-	for sec, n in pairs(tally_by_sec) do
+	for sec, n in pairs(t) do
 		if n and n > 0 then
 			table.insert(rows, { sec = sec, n = n })
 		end
 	end
+	table.sort(rows, function(a, b) return a.sec < b.sec end)
+	return rows
+end
+
+-- Same shape as tally_loaded_sorted, but takes a {sec=count} map.
+local function tally_map_sorted(map)
+	if not map then return {} end
+	local rows = {}
+	for sec, n in pairs(map) do
+		if n and n > 0 then
+			table.insert(rows, { sec = sec, n = n })
+		end
+	end
+	table.sort(rows, function(a, b) return a.sec < b.sec end)
+	return rows
+end
+
+local function build_loaded_rounds_tip_text(total, tally_by_sec)
+	local first = string.format(game.translate_string("st_seqload_loaded"), tostring(total))
+	local rows = tally_map_sorted(tally_by_sec)
 	if #rows == 0 then
 		return first
 	end
-	table.sort(rows, function(a, b) return a.sec < b.sec end)
 	local row_fmt = game.translate_string("st_seqload_dump_round")
 	local body_lines = {}
 	for _, e in ipairs(rows) do
 		local nm = game.translate_string(ui_item.get_sec_name(e.sec))
 		table.insert(body_lines, string.format(row_fmt, nm, e.n))
 	end
-	local block = TIP_LOAD_TYPE_COLOR .. table.concat(body_lines, MSG_NL) .. TIP_LOAD_TYPE_END
+	local block = TIP_AMBER .. table.concat(body_lines, MSG_NL) .. TIP_DEFAULT
 	return first .. MSG_NL .. block
 end
 
@@ -367,25 +536,20 @@ local function perform_instant_load(mag, preset, mag_data, free)
 	local cycle_len = #cycle
 	if cycle_len == 0 then return end
 
+	-- Plan the full load in one pass: skip exhausted types and keep
+	-- going with whatever is still in inventory (e.g. 20+20+15 of 60).
+	local stock = {}
+	for ammo, pool in pairs(inv) do stock[ammo] = pool.total end
+	local planned = plan_cycle_advance(cycle, 1, free, stock)
 	local loaded = 0
 	local loaded_by = {}
-	local cycle_pos = 1
-	for _ = 1, free do
-		local round_taken = false
-		for _ = 1, cycle_len do
-			local ammo = cycle[cycle_pos]
-			local pool = inv[ammo]
-			if pool and pool.total > 0 and take_one_round(pool) then
-				stack.push(mag_data.loaded, ammo)
-				loaded = loaded + 1
-				loaded_by[ammo] = (loaded_by[ammo] or 0) + 1
-				cycle_pos = (cycle_pos % cycle_len) + 1
-				round_taken = true
-				break
-			end
-			cycle_pos = (cycle_pos % cycle_len) + 1
+	for _, ammo in ipairs(planned) do
+		local pool = inv[ammo]
+		if pool and take_one_round(pool) then
+			stack.push(mag_data.loaded, ammo)
+			loaded = loaded + 1
+			loaded_by[ammo] = (loaded_by[ammo] or 0) + 1
 		end
-		if not round_taken then break end
 	end
 
 	if loaded > 0 then
@@ -394,12 +558,11 @@ local function perform_instant_load(mag, preset, mag_data, free)
 			xr_sound.set_sound_play(AC_ID, "reload_shell")
 		end
 		refresh_mags_inventory_info()
-		if magazines and magazines.timed_refresh then
-			magazines.timed_refresh()
+		if tip_after_load_enabled() then
+			news_manager.send_tip(db.actor,
+				build_loaded_rounds_tip_text(loaded, loaded_by),
+				nil, "swiss_knife", 4000)
 		end
-		news_manager.send_tip(db.actor,
-			build_loaded_rounds_tip_text(loaded, loaded_by),
-			nil, "swiss_knife", 4000)
 	end
 end
 
@@ -421,30 +584,85 @@ local function finalize(mag_id, reason)
 	if magazines and magazines.do_interrupt_magload then
 		magazines.do_interrupt_magload()
 	end
+	-- Single inventory_refresh(2) is enough; we don't chain timed_refresh()
+	-- because the immediate refresh already updates the magazine counter.
 	refresh_mags_inventory_info()
-	if magazines and magazines.timed_refresh then
-		magazines.timed_refresh()
-	end
 	if not state then return end
+
+	local show_summary = tip_after_load_enabled()
 	if reason == "done" or reason == "exhausted" then
 		if state.loaded > 0 then
-			news_manager.send_tip(db.actor,
-				build_loaded_rounds_tip_text(state.loaded, state.by_type),
-				nil, "swiss_knife", 4000)
+			if show_summary then
+				news_manager.send_tip(db.actor,
+					build_loaded_rounds_tip_text(state.loaded, state.by_type),
+					nil, "swiss_knife", 4000)
+			end
 		elseif reason == "exhausted" then
+			-- "no ammo" is a status, not a per-load summary — always shown.
 			news_manager.send_tip(db.actor, game.translate_string("st_seqload_no_ammo"),
 				nil, "swiss_knife", 4000)
 		end
 	elseif reason == "cancelled" then
 		if state.loaded > 0 then
-			news_manager.send_tip(db.actor,
-				build_loaded_rounds_tip_text(state.loaded, state.by_type),
-				nil, "swiss_knife", 4000)
+			if show_summary then
+				news_manager.send_tip(db.actor,
+					build_loaded_rounds_tip_text(state.loaded, state.by_type),
+					nil, "swiss_knife", 4000)
+			end
 		else
+			-- "interrupted with 0 rounds" is a status — always shown.
 			news_manager.send_tip(db.actor, game.translate_string("st_seqload_interrupted"),
 				nil, "swiss_knife", 3000)
 		end
 	end
+end
+
+-- Re-scan actor inventory into the cached pools (after a type runs out).
+local function refresh_inv_pools(inv)
+	if not db.actor then return end
+	for _, pool in pairs(inv) do
+		pool.total = 0
+		pool.boxes = {}
+	end
+	db.actor:iterate_inventory(function(_, item)
+		local sec = item:section()
+		local pool = inv[sec]
+		if pool then
+			table.insert(pool.boxes, item)
+			pool.total = pool.total + (item:ammo_get_count() or 0)
+		end
+	end)
+end
+
+-- Try to load exactly one round; skip depleted preset types via plan_cycle_advance.
+local function try_load_one_from_cycle(state, mag_id, mag_data)
+	local cycle = state.cycle
+	if not cycle or #cycle == 0 then return false end
+
+	local stock = {}
+	for ammo, pool in pairs(state.inv) do
+		stock[ammo] = pool.total
+	end
+	local planned, next_pos = plan_cycle_advance(cycle, state.cycle_pos, 1, stock)
+	if #planned == 0 then return false end
+
+	state.cycle_pos = next_pos
+	local ammo = planned[1]
+	local pool = state.inv[ammo]
+	if pool and pool.total > 0 and take_one_round(pool) then
+		stack.push(mag_data.loaded, ammo)
+		magazine_binder.set_data(mag_id, mag_data)
+		state.loaded = state.loaded + 1
+		state.by_type[ammo] = (state.by_type[ammo] or 0) + 1
+		if utils_obj and utils_obj.play_sound then
+			utils_obj.play_sound("magazines\\ammo_load" .. math.random(1, 7))
+		end
+		if magazines and magazines.inventory_refresh then
+			magazines.inventory_refresh(2)
+		end
+		return true
+	end
+	return false
 end
 
 local function gradual_tick(mag_id)
@@ -469,12 +687,15 @@ local function gradual_tick(mag_id)
 		return true
 	end
 
-	-- Cancellation 3: external action state change (user dragged ammo, etc).
-	-- Mags Redux resets action_state to NONE when it detects a conflict, so
-	-- any state other than ACTION_LOAD_MAG means we were interrupted.
+	-- Cancellation 3: losing Mags Redux action state (often caused by our
+	-- own take_one_round emptying a box). Re-claim the slot and continue.
 	if magazines and magazines.action_in_progress and not magazines.action_in_progress() then
-		finalize(mag_id, "cancelled")
-		return true
+		if magazines.action_start_magload then
+			magazines.action_start_magload()
+		else
+			finalize(mag_id, "cancelled")
+			return true
+		end
 	end
 
 	-- Full: done.
@@ -493,37 +714,19 @@ local function gradual_tick(mag_id)
 	if tg < state.last_tick + state.delay_ms then return false end
 	state.last_tick = tg
 
-	-- Walk the cycle looking for an ammo type that still has rounds.
-	local cycle = state.cycle
-	local cycle_len = #cycle
-	local attempts = 0
-	while attempts < cycle_len do
-		local ammo = cycle[state.cycle_pos]
-		local pool = state.inv[ammo]
-		if pool and pool.total > 0 and take_one_round(pool) then
-			stack.push(mag_data.loaded, ammo)
-			magazine_binder.set_data(mag_id, mag_data)
-			state.loaded = state.loaded + 1
-			state.by_type[ammo] = (state.by_type[ammo] or 0) + 1
-			state.cycle_pos = (state.cycle_pos % cycle_len) + 1
-			if utils_obj and utils_obj.play_sound then
-				utils_obj.play_sound("magazines\\ammo_load" .. math.random(1, 7))
-			end
-			-- Direct inventory_refresh (not timed_refresh), because timed_refresh
-			-- debounces with 0.5s and keeps getting postponed by our own ticks,
-			-- so the magazine counter "X/Y" never updates until loading ends.
-			-- Mags Redux's own per-round loader uses inventory_refresh(2) for the
-			-- same reason.
-			if magazines and magazines.inventory_refresh then
-				magazines.inventory_refresh(2)
-			end
-			return false
-		end
-		state.cycle_pos = (state.cycle_pos % cycle_len) + 1
-		attempts = attempts + 1
+	-- Rescan inventory each tick so a depleted box does not stall the cycle.
+	refresh_inv_pools(state.inv)
+
+	if try_load_one_from_cycle(state, mag_id, mag_data) then
+		return false
 	end
 
-	-- No ammo type has rounds left.
+	-- One type may have just run out; rescan again before giving up.
+	refresh_inv_pools(state.inv)
+	if try_load_one_from_cycle(state, mag_id, mag_data) then
+		return false
+	end
+
 	finalize(mag_id, "exhausted")
 	return true
 end
@@ -640,44 +843,39 @@ end
 -- Max number of run-length groups to print before truncating.
 local DUMP_MAX_ROWS = 10
 
--- Build dump text: one header line plus up to DUMP_MAX_ROWS grouped
--- ammo lines. Input mag_data.loaded is a LIFO stack (stack.push
--- appends to the end), so the NEXT round to be fired is the last
--- element. We walk it from end to start and compress consecutive
--- identical sections into "<localized name> - Nx" rows.
---
-local DUMP_NEWLINE = MSG_NL
--- X-Ray news colour tokens (see st_dynamic_news: %c[A,R,G,B] then %c[default]).
-local DUMP_COLOR_REMAINDER = "%c[255,255,200,100]"
-local DUMP_COLOR_END       = "%c[default]"
-
--- Tally all rounds in mag_data.loaded by ammo section; return sorted
--- section list (alphabetical) and counts (order-firing is irrelevant here).
-local function tally_loaded_by_ammo(loaded)
-	local t = {}
-	for _, sec in ipairs(loaded) do
-		t[sec] = (t[sec] or 0) + 1
-	end
-	local secs = {}
-	for sec, _ in pairs(t) do
-		table.insert(secs, sec)
-	end
-	table.sort(secs)
-	return secs, t
+-- Resolve loaded-round array from mag_data or a plain stack table.
+local function resolve_loaded_stack(src)
+	if not src then return nil end
+	if src.loaded then return src.loaded end
+	if #src > 0 then return src end
+	return nil
 end
 
-local function build_dump_text(header, mag_data)
+local function engine_round_count(wpn, loaded)
+	if wpn and type(wpn.get_ammo_in_magazine) == "function" then
+		return wpn:get_ammo_in_magazine() or 0
+	end
+	return loaded and #loaded or 0
+end
+
+-- Build dump text: header, grouped order list, per-type tally.
+-- src = mag_data table or plain loaded stack array.
+-- Optional wpn: live weapon object for accurate round count in the dump.
+function build_dump_text(header, src, wpn)
 	local lines = {header}
 
-	local loaded = mag_data and mag_data.loaded or nil
-	if (not loaded) or #loaded == 0 then
+	local loaded = resolve_loaded_stack(src)
+	if not loaded or #loaded == 0 then
 		table.insert(lines, game.translate_string("st_seqload_dump_empty"))
-		return table.concat(lines, DUMP_NEWLINE)
+		return table.concat(lines, MSG_NL)
 	end
+
+	local total = engine_round_count(wpn, loaded)
+	local display_len = math.min(#loaded, total > 0 and total or #loaded)
 
 	local row_fmt = game.translate_string("st_seqload_dump_round")
 	local groups = 0
-	local i = #loaded
+	local i = display_len
 	while i >= 1 and groups < DUMP_MAX_ROWS do
 		local sec = loaded[i]
 		local count = 0
@@ -690,26 +888,27 @@ local function build_dump_text(header, mag_data)
 		groups = groups + 1
 	end
 
-	-- If we stopped because of the row cap but there are more rounds
-	-- below, append a "..." marker instead of listing them all.
 	if i >= 1 then
 		table.insert(lines, game.translate_string("st_seqload_dump_more"))
 	end
 
-	-- "Остаток" + per-type lines: one colour run, "\\n" between lines only.
-	local rem_head = game.translate_string("st_seqload_dump_remainder_header")
-	local sorted_secs, tally = tally_loaded_by_ammo(loaded)
-	local rem_lines = { rem_head }
-	for _, sec in ipairs(sorted_secs) do
-		local nm = game.translate_string(ui_item.get_sec_name(sec))
-		table.insert(rem_lines, string.format(row_fmt, nm, tally[sec]))
+	-- Per-type totals for rounds currently in the weapon.
+	local tally_src = {}
+	for j = 1, display_len do
+		tally_src[j] = loaded[j]
 	end
-	local rem_block = DUMP_COLOR_REMAINDER
-		.. table.concat(rem_lines, DUMP_NEWLINE) .. DUMP_COLOR_END
-	table.insert(lines, "")
-	table.insert(lines, rem_block)
+	local tally_rows = tally_loaded_sorted(tally_src)
+	if #tally_rows > 0 then
+		local rem_head = game.translate_string("st_seqload_dump_remainder_header")
+		local rem_lines = { rem_head }
+		for _, e in ipairs(tally_rows) do
+			local nm = game.translate_string(ui_item.get_sec_name(e.sec))
+			table.insert(rem_lines, string.format(row_fmt, nm, e.n))
+		end
+		table.insert(lines, TIP_AMBER .. table.concat(rem_lines, MSG_NL) .. TIP_DEFAULT)
+	end
 
-	return table.concat(lines, DUMP_NEWLINE)
+	return table.concat(lines, MSG_NL)
 end
 
 -- Public: dump for a magazine under cursor / in inventory.
@@ -733,11 +932,11 @@ function dump_weapon_mag(wpn)
 	local header = game.translate_string(ui_item.get_sec_name(wpn:section()))
 	local mag_data = magazine_binder.get_mag_loaded(wpn:id())
 	if not mag_data then
-		local text = header .. DUMP_NEWLINE .. game.translate_string("st_seqload_dump_no_mag")
+		local text = header .. MSG_NL .. game.translate_string("st_seqload_dump_no_mag")
 		news_manager.send_tip(db.actor, text, nil, "swiss_knife", 6000)
 		return
 	end
-	local text = build_dump_text(header, mag_data)
+	local text = build_dump_text(header, mag_data, wpn)
 	news_manager.send_tip(db.actor, text, nil, "swiss_knife", 8000)
 end
 
@@ -794,27 +993,18 @@ function get_mag_ammo_type_tooltip_block(mag_data)
 	if not (utils_xml and utils_xml.get_color and ui_item) then
 		return nil
 	end
-	local t = {}
-	for _, sec in ipairs(mag_data.loaded) do
-		t[sec] = (t[sec] or 0) + 1
-	end
-	local rows = {}
-	for sec, n in pairs(t) do
-		if n and n > 0 then
-			table.insert(rows, { sec = sec, n = n })
-		end
-	end
+	local rows = tally_loaded_sorted(mag_data.loaded)
 	if #rows == 0 then
 		return nil
 	end
-	table.sort(rows, function(a, b) return a.sec < b.sec end)
 	local clr_g = utils_xml.get_color("d_green")
 	local clr_2 = utils_xml.get_color("ui_gray_1")
 	if not (clr_g and clr_2) then
 		return nil
 	end
 	local hdr = game.translate_string("st_seqload_tooltip_type_header")
-	-- After clr_g the colour stays active; reset with clr_2 (same as st_mag_ammo_loaded_count line in mags_patches).
+	-- After clr_g the colour stays active; reset with clr_2 (same pattern as
+	-- st_mag_ammo_loaded_count line in mags_patches).
 	local parts = { clr_2 .. hdr .. " \\n" }
 	for _, e in ipairs(rows) do
 		local nm = game.translate_string(ui_item.get_sec_short_name(e.sec))
@@ -829,8 +1019,16 @@ end
 --------------------------------------------------------------------
 
 function on_game_start()
+	-- Preset persistence and inventory-close interrupt are useful even
+	-- without Mags Redux: the internal-mag (non-magazine) loader uses
+	-- the same preset table, and its UI editor also needs save/load.
+	RegisterScriptCallback("save_state",  save_state)
+	RegisterScriptCallback("load_state",  load_state)
+	RegisterScriptCallback("GUI_on_hide", on_gui_hide)
+	RegisterScriptCallback("actor_on_first_update", reset_caliber_cache)
+
 	if not magazine_binder then
-		printf("Sequential Load: Anomaly Magazines Redux not found, mod disabled")
+		printf("Sequential Load: Anomaly Magazines Redux not found, magazine mode disabled (internal-mag mode still works)")
 		return
 	end
 	if not (custom_functor_autoinject and custom_functor_autoinject.add_functor) then
@@ -839,8 +1037,4 @@ function on_game_start()
 		custom_functor_autoinject.add_functor("seqload_magazine",
 			menu_check, menu_str, nil, menu_action, true)
 	end
-
-	RegisterScriptCallback("save_state",  save_state)
-	RegisterScriptCallback("load_state",  load_state)
-	RegisterScriptCallback("GUI_on_hide", on_gui_hide)
 end

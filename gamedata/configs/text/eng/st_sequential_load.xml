@@ -136,8 +136,16 @@
 		<text>No magazine attached</text>
 	</string>
 
+	<string id="st_seqload_dump_on_top">
+		<text>In chamber: %s</text>
+	</string>
+
 	<string id="st_seqload_dump_remainder_header">
 		<text>Remainder:</text>
+	</string>
+
+	<string id="st_seqload_dump_total">
+		<text>Total loaded: %d</text>
 	</string>
 
 	<!-- MCM list/radio: path seqload/dump_weapon_modifier, value 0-3 -->
@@ -173,12 +181,36 @@
 		<text>If enabled - ammo with _bad and _verybad suffix (damaged) is hidden from the preset configuration menu and is not loaded into magazines. Enabled by default.</text>
 	</string>
 
+	<string id="ui_mcm_seqload_tip_after_load">
+		<text>Show post-load message</text>
+	</string>
+
+	<string id="ui_mcm_seqload_tip_after_load_desc">
+		<text>If enabled, after a successful sequential load a short message appears with the total number of rounds loaded and a per-ammo-type breakdown. If disabled, the message is suppressed. Status messages (&quot;no ammo&quot;, &quot;magazine full&quot;, &quot;loading interrupted&quot;) are not affected by this option. Enabled by default.</text>
+	</string>
+
 	<string id="ui_mcm_seqload_tooltip_ammo_types">
 		<text>Magazine tooltip: ammo types</text>
 	</string>
 
 	<string id="ui_mcm_seqload_tooltip_ammo_types_desc">
 		<text>If enabled, the magazine item tooltip shows a &quot;Type:&quot; section with how many rounds of each ammo type are inside, between the loaded count and &quot;Round on top&quot; (or before the detailed round list). Colours match the default Mags Redux tooltip. Enabled by default.</text>
+	</string>
+
+	<string id="ui_mcm_seqload_internal_mag_enabled">
+		<text>Sequential loading for non-magazine weapons</text>
+	</string>
+
+	<string id="ui_mcm_seqload_internal_mag_enabled_desc">
+		<text>If enabled, the mod also handles weapons WITHOUT a Mags Redux magazine: pump shotguns, internal-magazine rifles, weapons that Mags Redux does not modify, and every weapon when Mags Redux is not installed. The same caliber preset configured for magazines is used. Pump shotgun reload happens shell-by-shell as in vanilla; for other internal-mag weapons the preset is applied during the reload animation. If you interrupt a shotgun reload mid-animation, only the rounds that finished loading are kept. If disabled, internal-mag weapons load the single ammo type the player has selected (vanilla behaviour). Enabled by default.</text>
+	</string>
+
+	<string id="ui_mcm_seqload_hide_single_type_calibers">
+		<text>Hide single-type calibers</text>
+	</string>
+
+	<string id="ui_mcm_seqload_hide_single_type_calibers_desc">
+		<text>If enabled, calibers that have only one ammo type are hidden from the preset UI dropdown (alternation requires at least two types). Devices, knives, batteries and similar non-firearm entries are always excluded. Enabled by default.</text>
 	</string>
 
 	<string id="st_seqload_tooltip_type_header">
