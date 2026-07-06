@@ -19,38 +19,135 @@
 ----------------------------------------------------------------
 
 -- Presets are persisted per save via save_state/load_state.
--- Shape:
---   presets[caliber] = { {ammo = "ammo_5.45x39_fmj", count = 3}, ... }
+-- Storage shape (v2, two slots per caliber):
+--   presets[caliber] = {
+--       A      = { {ammo = "ammo_...", count = 3}, ... } | nil,
+--       B      = { ... } | nil,
+--       active = "A" | "B",   -- slot used by the hotkey / plain load
+--   }
+-- v1 shape (plain array) is migrated transparently in load_state /
+-- slot_entry so old saves keep their preset as slot A.
 local presets = {}
+
+local SLOT_A = "A"
+local SLOT_B = "B"
 
 --------------------------------------------------------------------
 -- Preset storage ---------------------------------------------------
 --------------------------------------------------------------------
 
+-- v1 -> v2 entry migration. An old entry is a plain array of rows.
+local function migrate_entry(e)
+	if type(e) ~= "table" then return nil end
+	if e.A or e.B or e.active then return e end
+	if #e > 0 then
+		return { A = e, active = SLOT_A }
+	end
+	return nil
+end
+
+-- Resolve (and optionally create) the v2 slot entry for a caliber.
+local function slot_entry(caliber, create)
+	if not caliber then return nil end
+	local e = migrate_entry(presets[caliber])
+	if e then
+		presets[caliber] = e
+		return e
+	end
+	if create then
+		e = { active = SLOT_A }
+		presets[caliber] = e
+		return e
+	end
+	return nil
+end
+
+local function valid_slot(slot)
+	return slot == SLOT_A or slot == SLOT_B
+end
+
 function get_presets()
 	return presets
 end
 
+-- Active-slot preset (used by hotkey, internal-mag loader, plain load).
 function get_preset(caliber)
-	return presets[caliber]
+	local e = slot_entry(caliber)
+	if not e then return nil end
+	return e[e.active or SLOT_A]
+end
+
+function get_preset_slot(caliber, slot)
+	if not valid_slot(slot) then return nil end
+	local e = slot_entry(caliber)
+	return e and e[slot]
+end
+
+function has_preset_slot(caliber, slot)
+	local p = get_preset_slot(caliber, slot)
+	return p ~= nil and #p > 0
 end
 
 function has_preset(caliber)
-	return presets[caliber] ~= nil and #presets[caliber] > 0
+	return has_preset_slot(caliber, SLOT_A) or has_preset_slot(caliber, SLOT_B)
 end
 
-function save_preset(caliber, preset)
-	if not caliber then return end
+function get_active_slot(caliber)
+	local e = slot_entry(caliber)
+	return (e and e.active) or SLOT_A
+end
+
+-- Forward declaration; defined in the gradual-load section below.
+local cancel_loads_for_caliber
+
+-- Set the active slot. Any gradual load currently running on a magazine
+-- of this caliber is cancelled: the user just changed what "load" means.
+-- Returns true when the active slot actually changed.
+function set_active_slot(caliber, slot)
+	if not caliber or not valid_slot(slot) then return false end
+	local e = slot_entry(caliber, true)
+	if e.active == slot then return false end
+	e.active = slot
+	if cancel_loads_for_caliber then
+		cancel_loads_for_caliber(caliber)
+	end
+	return true
+end
+
+-- A <-> B. Returns the new active slot, or nil when nothing is saved
+-- for this caliber (switching would be meaningless).
+function toggle_active_slot(caliber)
+	local e = slot_entry(caliber)
+	if not e or not (e.A or e.B) then return nil end
+	local new_slot = (e.active == SLOT_B) and SLOT_A or SLOT_B
+	set_active_slot(caliber, new_slot)
+	return new_slot
+end
+
+function save_preset_slot(caliber, slot, preset)
+	if not caliber or not valid_slot(slot) then return end
+	local e = slot_entry(caliber, true)
 	if preset and #preset > 0 then
-		presets[caliber] = preset
+		e[slot] = preset
 	else
+		e[slot] = nil
+	end
+	if not (e.A or e.B) then
 		presets[caliber] = nil
 	end
 end
 
+-- Back-compat wrappers (write to the active slot).
+function save_preset(caliber, preset)
+	save_preset_slot(caliber, get_active_slot(caliber), preset)
+end
+
 function reset_preset(caliber)
-	if not caliber then return end
-	presets[caliber] = nil
+	save_preset_slot(caliber, get_active_slot(caliber), nil)
+end
+
+function reset_preset_slot(caliber, slot)
+	save_preset_slot(caliber, slot, nil)
 end
 
 local function save_state(mdata)
@@ -59,6 +156,11 @@ end
 
 local function load_state(mdata)
 	presets = mdata.seqload_presets or {}
+	-- Migrate every v1 entry in place so the rest of the code only ever
+	-- sees the v2 shape.
+	for cal, e in pairs(presets) do
+		presets[cal] = migrate_entry(e)
+	end
 end
 
 --------------------------------------------------------------------
@@ -515,7 +617,10 @@ end
 -- Instant loading --------------------------------------------------
 --------------------------------------------------------------------
 
-local function perform_instant_load(mag, preset, mag_data, free)
+-- used_slot: "A" | "B" when a saved slot was used, nil for the default
+-- alphabetical preset. Recorded into mag_data.seqload_preset so the
+-- tooltip can show which preset was loaded last (nil clears the mark).
+local function perform_instant_load(mag, preset, mag_data, free, used_slot)
 	local types = {}
 	for _, e in ipairs(preset) do
 		table.insert(types, e.ammo)
@@ -553,6 +658,7 @@ local function perform_instant_load(mag, preset, mag_data, free)
 	end
 
 	if loaded > 0 then
+		mag_data.seqload_preset = used_slot
 		magazine_binder.set_data(mag:id(), mag_data)
 		if xr_sound and xr_sound.set_sound_play then
 			xr_sound.set_sound_play(AC_ID, "reload_shell")
@@ -578,6 +684,9 @@ local in_progress = {}
 
 local function finalize(mag_id, reason)
 	local state = in_progress[mag_id]
+	-- No load was running for this mag: nothing to release or refresh,
+	-- and interrupting Mags Redux here could break someone else's magload.
+	if not state then return end
 	in_progress[mag_id] = nil
 	-- Release Mags Redux action state only if we set it. Using the public
 	-- "interrupt" helper is safe even if state was reset by something else.
@@ -587,7 +696,6 @@ local function finalize(mag_id, reason)
 	-- Single inventory_refresh(2) is enough; we don't chain timed_refresh()
 	-- because the immediate refresh already updates the magazine counter.
 	refresh_mags_inventory_info()
-	if not state then return end
 
 	local show_summary = tip_after_load_enabled()
 	if reason == "done" or reason == "exhausted" then
@@ -651,6 +759,7 @@ local function try_load_one_from_cycle(state, mag_id, mag_data)
 	local pool = state.inv[ammo]
 	if pool and pool.total > 0 and take_one_round(pool) then
 		stack.push(mag_data.loaded, ammo)
+		mag_data.seqload_preset = state.used_slot
 		magazine_binder.set_data(mag_id, mag_data)
 		state.loaded = state.loaded + 1
 		state.by_type[ammo] = (state.by_type[ammo] or 0) + 1
@@ -731,7 +840,7 @@ local function gradual_tick(mag_id)
 	return true
 end
 
-local function perform_gradual_load(mag, preset, mag_data, free)
+local function perform_gradual_load(mag, preset, mag_data, free, used_slot)
 	local mag_id = mag:id()
 
 	-- Don't double-schedule.
@@ -775,6 +884,8 @@ local function perform_gradual_load(mag, preset, mag_data, free)
 		loaded            = 0,
 		by_type           = {},
 		inventory_closed  = false,
+		used_slot         = used_slot,
+		caliber           = get_mag_caliber(mag),
 	}
 
 	-- Claim Mags Redux action slot so drag-drop loads get rejected
@@ -790,11 +901,34 @@ local function perform_gradual_load(mag, preset, mag_data, free)
 	end)
 end
 
+-- Cancel every gradual load running on a magazine of the given caliber.
+-- Called from set_active_slot: switching presets mid-load must stop the
+-- load, otherwise it would keep filling with the old preset's cycle.
+-- (Assigned to the local forward-declared near the preset storage.)
+cancel_loads_for_caliber = function(caliber)
+	if not caliber then return end
+	local to_cancel = {}
+	for mag_id, state in pairs(in_progress) do
+		if state.caliber == caliber then
+			table.insert(to_cancel, mag_id)
+		end
+	end
+	for _, mag_id in ipairs(to_cancel) do
+		finalize(mag_id, "cancelled")
+	end
+end
+
 --------------------------------------------------------------------
 -- Main entry point -------------------------------------------------
 --------------------------------------------------------------------
 
-function perform_sequential_load(mag)
+-- slot_override: "A" | "B"  - load that saved slot explicitly (submenu);
+--                "default"  - force the default alphabetical preset,
+--                             ignoring saved slots (submenu's last row);
+--                nil        - load the caliber's ACTIVE slot (hotkey,
+--                             plain click), falling back to the default
+--                             alphabetical preset when nothing is saved.
+function perform_sequential_load(mag, slot_override)
 	if not (magazine_binder and magazine_binder.is_magazine and magazine_binder.is_magazine(mag)) then
 		return
 	end
@@ -821,19 +955,53 @@ function perform_sequential_load(mag)
 		return
 	end
 
-	-- Resolve preset.
+	-- Resolve preset: explicit slot > active slot > default alphabetical.
 	local caliber = get_mag_caliber(mag)
-	local preset = filter_preset_for_mag(caliber and presets[caliber], mag)
+	local used_slot = nil
+	local raw_preset = nil
+	if slot_override == "default" then
+		-- explicit request for the default alphabetical preset
+	elseif slot_override then
+		raw_preset = get_preset_slot(caliber, slot_override)
+		used_slot = slot_override
+	else
+		raw_preset = get_preset(caliber)
+		used_slot = get_active_slot(caliber)
+	end
+	local preset = filter_preset_for_mag(raw_preset, mag)
 	if #preset == 0 then
 		preset = build_default_preset(mag)
+		used_slot = nil
 	end
 	if #preset == 0 then return end
 
 	if instant_enabled() then
-		perform_instant_load(mag, preset, mag_data, free)
+		perform_instant_load(mag, preset, mag_data, free, used_slot)
 	else
-		perform_gradual_load(mag, preset, mag_data, free)
+		perform_gradual_load(mag, preset, mag_data, free, used_slot)
 	end
+end
+
+--------------------------------------------------------------------
+-- Active-slot switch for the magazine under cursor (Shift+U hotkey).
+-- Returns true when the switch happened (caller may play a sound).
+--------------------------------------------------------------------
+
+function switch_preset_for_mag(mag)
+	local caliber = get_mag_caliber(mag)
+	if not caliber then return false end
+	local new_slot = toggle_active_slot(caliber)
+	if not new_slot then
+		news_manager.send_tip(db.actor,
+			game.translate_string("st_seqload_no_presets_to_switch"),
+			nil, "swiss_knife", 3000)
+		return false
+	end
+	news_manager.send_tip(db.actor,
+		string.format(game.translate_string("st_seqload_active_switched"),
+			caliber, new_slot),
+		nil, "swiss_knife", 3000)
+	return true
 end
 
 --------------------------------------------------------------------
@@ -978,8 +1146,19 @@ local function menu_str(obj, bag, mode)
 	return "st_seqload_menu"
 end
 
+-- Open the A/B picker popup (WPO-style nested menu) only when BOTH slots
+-- are saved for this caliber - that's the only case with a real choice.
+-- With one or zero saved slots there is nothing to pick, so load directly
+-- (active slot, falling back to the default alphabetical preset).
 local function menu_action(obj, bag, mode)
-	perform_sequential_load(obj)
+	local caliber = get_mag_caliber(obj)
+	if caliber and has_preset_slot(caliber, SLOT_A) and has_preset_slot(caliber, SLOT_B)
+		and sequential_load_magazine_submenu
+		and sequential_load_magazine_submenu.show_for_mag then
+		sequential_load_magazine_submenu.show_for_mag(obj)
+	else
+		perform_sequential_load(obj)
+	end
 end
 
 --------------------------------------------------------------------
@@ -1012,6 +1191,26 @@ function get_mag_ammo_type_tooltip_block(mag_data)
 			clr_2 .. nm .. " - " .. clr_g .. tostring(e.n) .. "x" .. clr_2 .. " \\n")
 	end
 	return table.concat(parts, "")
+end
+
+-- One tooltip line "Preset: A" - which saved slot this magazine was last
+-- loaded with. Nil when the mag was never sequentially loaded from a
+-- saved slot (default alphabetical loads clear the mark).
+function get_mag_preset_tooltip_line(mag_data)
+	local slot = mag_data and mag_data.seqload_preset
+	if slot ~= "A" and slot ~= "B" then
+		return nil
+	end
+	if not (utils_xml and utils_xml.get_color) then
+		return nil
+	end
+	local clr_g = utils_xml.get_color("d_green")
+	local clr_2 = utils_xml.get_color("ui_gray_1")
+	if not (clr_g and clr_2) then
+		return nil
+	end
+	local hdr = game.translate_string("st_seqload_tooltip_preset_header")
+	return clr_2 .. hdr .. " " .. clr_g .. slot .. clr_2 .. " \\n"
 end
 
 --------------------------------------------------------------------

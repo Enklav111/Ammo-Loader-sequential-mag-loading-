@@ -88,9 +88,10 @@ local section_cache = {}
 -- ammo_type for the whole magazine and these classes don't re-read it
 -- between rapid shots / shell-by-shell feeds. For them we re-assert the
 -- chamber type every stable tick (see actor_on_update_impl).
---   WP_BM16  - double-barrel shotguns (toz34, bm16, ...)
 --   WP_ASHTG - pump / automatic / revolver shotguns and bolt rifles
 --              (mp133, ithacam37, mts255, k98, sks, ...)
+-- Double-barrels (WP_BM16) are NOT here: they can't do mixed ammo at all
+-- and live in INELIGIBLE_CLASSES below.
 -- Magazine-fed classes (WP_USP45, WP_AK74, ...) already re-chamber fine
 -- and are intentionally excluded so working weapons stay untouched.
 local CHAMBER_ENFORCE_CLASSES = {

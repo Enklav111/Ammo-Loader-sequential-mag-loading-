@@ -1,0 +1,109 @@
+----------------------------------------------------------------
+-- Preset picker submenu for the "load sequentially" context-menu
+-- entry. Uses the vanilla UICellProperties popup (same pattern as
+-- Weapon Parts Overhaul's maintenance / field-strip menus), so it
+-- looks and behaves like a native nested context menu at the cursor.
+--
+-- Rows:
+--   * "Preset A" / "Preset B" - one per saved slot for the magazine's
+--                               caliber; the active slot gets an
+--                               "(active)" suffix.
+-- The picker is only opened when BOTH slots are saved (see menu_action);
+-- with a single saved slot there is nothing to choose, so the load runs
+-- directly. Picking a row starts the sequential load with that preset.
+----------------------------------------------------------------
+
+local gc = game.translate_string
+
+--------------------------------------------------------------------
+-- Popup class: UICellProperties with a plain-function dispatcher
+-- (the vanilla class calls methods on `owner`; we call self.functor).
+--------------------------------------------------------------------
+
+class "UISeqloadPresetMenu" (utils_ui.UICellProperties)
+
+function UISeqloadPresetMenu:__init(functor) super()
+	self.functor = functor
+end
+
+function UISeqloadPresetMenu:OnListItemDbClicked()
+	if self.list_box:GetSize() == 0 then return end
+	local item = self.list_box:GetSelectedItem()
+	if not item then return end
+
+	if item.func then
+		if item.params then
+			pcall(self.functor, unpack(item.params))
+		else
+			pcall(self.functor)
+		end
+		self.action_moment = time_continual()
+	end
+
+	if self:IsShown() then
+		self:OnHide()
+	end
+end
+
+--------------------------------------------------------------------
+-- Menu construction
+--------------------------------------------------------------------
+
+local menu = nil
+
+-- Row action: re-fetch the magazine by id (it may have been destroyed
+-- while the popup was open) and start the load with the picked slot.
+local function on_pick(mag_id, slot)
+	if not sequential_load_magazine then return end
+	local mag = level.object_by_id(mag_id)
+	if not mag then return end
+	sequential_load_magazine.perform_sequential_load(mag, slot)
+end
+
+local function slot_row_label(slot, is_active)
+	local label = string.format(gc("st_seqload_submenu_slot"), slot)
+	if is_active then
+		label = label .. gc("st_seqload_submenu_active")
+	end
+	return label
+end
+
+-- Show the preset picker for the given magazine at the cursor position.
+-- Falls back to a direct active-slot load when the popup class is not
+-- available for any reason (defence against exotic UI forks).
+function show_for_mag(mag)
+	local core = sequential_load_magazine
+	if not (core and mag) then return end
+
+	if not (utils_ui and utils_ui.UICellProperties) then
+		core.perform_sequential_load(mag)
+		return
+	end
+
+	local caliber = core.get_mag_caliber(mag)
+	local active = core.get_active_slot(caliber)
+	local mag_id = mag:id()
+
+	local names, actions, params = {}, {}, {}
+	local function add_row(label, slot)
+		table.insert(names, label)
+		-- `actions` only needs to be truthy per row (see OnListItemDbClicked:
+		-- item.func gates the call, self.functor does the actual work).
+		table.insert(actions, "load")
+		table.insert(params, { mag_id, slot })
+	end
+
+	for _, slot in ipairs({ "A", "B" }) do
+		if core.has_preset_slot(caliber, slot) then
+			add_row(slot_row_label(slot, active == slot), slot)
+		end
+	end
+
+	if not menu then
+		menu = UISeqloadPresetMenu(on_pick)
+	end
+	menu:Reset(GetCursorPosition(), actions, names, params)
+	if ui_inventory and ui_inventory.GUI and ui_inventory.GUI.PlaySND then
+		ui_inventory.GUI:PlaySND(sound_object([[interface\inv_properties_2]]))
+	end
+end

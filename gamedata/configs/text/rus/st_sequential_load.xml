@@ -210,4 +210,84 @@
 		<text>Тип:</text>
 	</string>
 
+	<string id="st_seqload_slot_a">
+		<text>Пресет A</text>
+	</string>
+
+	<string id="st_seqload_slot_b">
+		<text>Пресет B</text>
+	</string>
+
+	<string id="st_seqload_slot_editing">
+		<text>Редактируется: %s</text>
+	</string>
+
+	<string id="st_seqload_slot_active">
+		<text>Активный (хоткей): %s</text>
+	</string>
+
+	<string id="st_seqload_make_active">
+		<text>Сделать активным</text>
+	</string>
+
+	<string id="st_seqload_active_switched">
+		<text>Активный пресет для %s: %s</text>
+	</string>
+
+	<string id="st_seqload_no_presets_to_switch">
+		<text>Нет сохранённых пресетов для этого калибра</text>
+	</string>
+
+	<string id="st_seqload_submenu_slot">
+		<text>Пресет %s</text>
+	</string>
+
+	<string id="st_seqload_submenu_active">
+		<text> (активный)</text>
+	</string>
+
+	<string id="st_seqload_tooltip_preset_header">
+		<text>Пресет:</text>
+	</string>
+
+	<string id="ui_mcm_seqload_key_switch_preset">
+		<text>Клавиша смены пресета (A/B)</text>
+	</string>
+
+	<string id="ui_mcm_seqload_key_switch_preset_desc">
+		<text>При открытом инвентаре и курсоре на магазине - переключает активный пресет (A/B) для калибра этого магазина. Активный пресет используется клавишей зарядки и обычной зарядкой из контекстного меню. Требует модификатор ниже (по умолчанию Shift, то есть Shift+U). Переключение отменяет идущую постепенную зарядку этого калибра.</text>
+	</string>
+
+	<string id="ui_mcm_seqload_switch_preset_modifier">
+		<text>Смена пресета: модификатор</text>
+	</string>
+
+	<string id="ui_mcm_seqload_switch_preset_modifier_desc">
+		<text>Какую клавишу держать вместе с клавишей смены пресета. По умолчанию Shift. Если выбрать «без модификатора», а клавиша смены совпадает с клавишей зарядки - приоритет у зарядки и смена работать не будет; выберите другую клавишу или модификатор.</text>
+	</string>
+
+	<string id="seqload_switch_preset_modifier_lst_seqload_mod_none">
+		<text>Без модификатора (только клавиша смены)</text>
+	</string>
+
+	<string id="seqload_switch_preset_modifier_lst_seqload_mod_shift">
+		<text>Зажать Shift</text>
+	</string>
+
+	<string id="seqload_switch_preset_modifier_lst_seqload_mod_ctrl">
+		<text>Зажать Ctrl</text>
+	</string>
+
+	<string id="seqload_switch_preset_modifier_lst_seqload_mod_alt">
+		<text>Зажать Alt</text>
+	</string>
+
+	<string id="ui_mcm_seqload_tooltip_preset">
+		<text>Тултип магазина: последний пресет</text>
+	</string>
+
+	<string id="ui_mcm_seqload_tooltip_preset_desc">
+		<text>Если включено, в тултипе магазина отображается строка «Пресет:» с сохранённым пресетом (A или B), которым магазин был заряжен в последний раз. Зарядка по умолчанию (алфавитный порядок) убирает отметку. По умолчанию включено.</text>
+	</string>
+
 </string_table>

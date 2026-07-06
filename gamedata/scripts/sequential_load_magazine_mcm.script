@@ -22,8 +22,18 @@
 --                          rounds" + per-type breakdown) is shown after
 --                          a successful load (default: true). Status
 --                          tips ("no ammo", "interrupted") are unaffected.
+--   KEY_SWITCH           - DIK code for the preset A/B switch hotkey
+--                          (default DIK_U); works with the cursor over
+--                          a magazine in the inventory. Requires the
+--                          SWITCH_MODIFIER chord (default Shift+U).
+--   SWITCH_MODIFIER      - 0=none, 1=Shift, 2=Ctrl, 3=Alt for KEY_SWITCH.
+--                          When 0 and KEY_SWITCH == KEY_TOGGLE, loading
+--                          wins and switching is unreachable (misconfig).
 --   TOOLTIP_AMMO_TYPES   - if true, magazine tooltip shows a "Type:"
 --                          block with per-ammo counts (default: true).
+--   TOOLTIP_PRESET       - if true, magazine tooltip shows a "Preset:"
+--                          line with the last loaded saved slot (A/B)
+--                          (default: true).
 --   INTERNAL_MAG_ENABLED - if true, the mod also handles weapons
 --                          without a Mags Redux magazine (pump
 --                          shotguns, internal-mag rifles, all weapons
@@ -41,11 +51,14 @@
 KEY_TOGGLE             = DIK_keys.DIK_U
 KEY_DUMP               = 339         -- mouse3 / MMB
 DUMP_MODIFIER          = 1           -- 0=none, 1=shift, 2=ctrl, 3=alt
+KEY_SWITCH             = DIK_keys.DIK_U
+SWITCH_MODIFIER        = 1           -- 0=none, 1=shift, 2=ctrl, 3=alt
 DEBUG                   = false
 INSTANT_LOAD            = false
 IGNORE_BAD              = true
 TIP_AFTER_LOAD          = true
 TOOLTIP_AMMO_TYPES      = true
+TOOLTIP_PRESET          = true
 INTERNAL_MAG_ENABLED    = true
 HIDE_SINGLE_CALIBER     = true
 
@@ -83,6 +96,26 @@ function on_mcm_load()
 				def = DIK_keys.DIK_U,
 			},
 			{
+				id = "key_switch_preset",
+				type = "key_bind",
+				val = 2,
+				def = DIK_keys.DIK_U,
+			},
+			-- Modifier for the preset-switch hotkey. Default Shift, so the
+			-- stock layout is: U = load active preset, Shift+U = switch A/B.
+			{
+				id      = "switch_preset_modifier",
+				type    = ui_mcm and ui_mcm.kb_mod_radio or "radio_h",
+				val     = 2,
+				def     = 1,
+				content = {
+					{0, "seqload_mod_none"},
+					{1, "seqload_mod_shift"},
+					{2, "seqload_mod_ctrl"},
+					{3, "seqload_mod_alt"},
+				},
+			},
+			{
 				id = "instant_load",
 				type = "check",
 				val = 1,
@@ -103,6 +136,12 @@ function on_mcm_load()
 			},
 			{
 				id = "tooltip_ammo_types",
+				type = "check",
+				val = 1,
+				def = true,
+			},
+			{
+				id = "tooltip_preset",
 				type = "check",
 				val = 1,
 				def = true,
@@ -161,6 +200,8 @@ local function load_settings()
 	KEY_TOGGLE    = get_mcm_value("seqload/key_toggle",            DIK_keys.DIK_U)
 	KEY_DUMP      = get_mcm_value("seqload/key_dump",              339)
 	DUMP_MODIFIER = get_mcm_value("seqload/dump_weapon_modifier",  1)
+	KEY_SWITCH    = get_mcm_value("seqload/key_switch_preset",     DIK_keys.DIK_U)
+	SWITCH_MODIFIER = get_mcm_value("seqload/switch_preset_modifier", 1)
 	local dbg     = get_mcm_value("seqload/debug",                 false)
 	DEBUG         = (dbg == true) or (dbg == 1)
 	INSTANT_LOAD  = get_mcm_value("seqload/instant_load",          false)
@@ -169,6 +210,8 @@ local function load_settings()
 	TIP_AFTER_LOAD = not (tip_atl == false or tip_atl == 0)
 	local tip_amt = get_mcm_value("seqload/tooltip_ammo_types",    true)
 	TOOLTIP_AMMO_TYPES = not (tip_amt == false or tip_amt == 0)
+	local tip_pr  = get_mcm_value("seqload/tooltip_preset",        true)
+	TOOLTIP_PRESET = not (tip_pr == false or tip_pr == 0)
 	local intm    = get_mcm_value("seqload/internal_mag_enabled",  true)
 	INTERNAL_MAG_ENABLED = not (intm == false or intm == 0)
 	local hide1   = get_mcm_value("seqload/hide_single_type_calibers", true)
@@ -232,9 +275,9 @@ local function on_gui_hide(name, path)
 	hovered_obj = nil
 end
 
--- Is the configured modifier currently held (weapon-hand dump). Value 0 = no requirement.
-local function modifier_matches()
-	local m = DUMP_MODIFIER
+-- Is the given kb_mod value (0=none, 1=Shift, 2=Ctrl, 3=Alt) held right now?
+-- Value 0 means "no requirement" and always matches.
+local function mod_held(m)
 	if m == 0 then
 		return true
 	end
@@ -246,6 +289,29 @@ local function modifier_matches()
 		return key_state(DIK_keys.DIK_LMENU) == 1 or key_state(DIK_keys.DIK_RMENU) == 1
 	end
 	return false
+end
+
+-- Is the configured modifier currently held (weapon-hand dump).
+local function modifier_matches()
+	return mod_held(DUMP_MODIFIER)
+end
+
+-- True when this key press should be treated as the preset-switch hotkey.
+-- Misconfig guard: when the switch key equals the load key AND no modifier
+-- is required, loading wins and switching is unreachable (otherwise plain
+-- U would only ever switch and never load).
+local function is_switch_press(dik)
+	if dik ~= KEY_SWITCH then return false end
+	if SWITCH_MODIFIER == 0 and KEY_SWITCH == KEY_TOGGLE then return false end
+	return mod_held(SWITCH_MODIFIER)
+end
+
+-- True when this KEY_TOGGLE press must be ignored because the same physical
+-- press already qualifies as a switch chord (switch key == load key + held
+-- modifier). Prevents Shift+U from both switching and loading.
+local function toggle_shadowed_by_switch(dik)
+	return dik == KEY_TOGGLE and KEY_SWITCH == KEY_TOGGLE
+		and SWITCH_MODIFIER ~= 0 and mod_held(SWITCH_MODIFIER)
 end
 
 --------------------------------------------------------------------
@@ -322,6 +388,14 @@ local function inv_handle_keys(dik)
 	end
 	local mag = get_hovered_actor_mag()
 	if not mag then
+		return
+	end
+	if is_switch_press(dik) and sequential_load_magazine
+		and sequential_load_magazine.switch_preset_for_mag then
+		sequential_load_magazine.switch_preset_for_mag(mag)
+		return
+	end
+	if toggle_shadowed_by_switch(dik) then
 		return
 	end
 	if dik == KEY_TOGGLE and sequential_load_magazine and sequential_load_magazine.perform_sequential_load then
@@ -436,9 +510,24 @@ local function handle_key_dump()
 	end
 end
 
+-- Preset switch via the global key path (inventory open but the window
+-- not consuming keys). Returns true when the press was consumed.
+local function handle_key_switch(key)
+	if not is_switch_press(key) then return false end
+	if not inventory_open() then return false end
+	local mag = get_hovered_actor_mag()
+	if not mag then return false end
+	if sequential_load_magazine and sequential_load_magazine.switch_preset_for_mag then
+		sequential_load_magazine.switch_preset_for_mag(mag)
+	end
+	return true
+end
+
 local function on_key_press(key)
 	if not db.actor then return end
+	if handle_key_switch(key) then return end
 	if key == KEY_TOGGLE then
+		if toggle_shadowed_by_switch(key) then return end
 		handle_key_toggle()
 	elseif key == KEY_DUMP then
 		handle_key_dump()

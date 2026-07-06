@@ -5,23 +5,26 @@
 -- Loads after mags_patches.script (name starts with zzz_).
 ----------------------------------------------------------------
 
-local function mcm_allows_tooltip_block()
+local function mcm_flag_enabled(name)
 	if not sequential_load_magazine_mcm then
 		return true
 	end
-	if sequential_load_magazine_mcm.TOOLTIP_AMMO_TYPES == false then
-		return false
-	end
-	if sequential_load_magazine_mcm.TOOLTIP_AMMO_TYPES == 0 then
+	local v = sequential_load_magazine_mcm[name]
+	if v == false or v == 0 then
 		return false
 	end
 	return true
 end
 
+local function mcm_allows_tooltip_block()
+	return mcm_flag_enabled("TOOLTIP_AMMO_TYPES")
+end
+
+local function mcm_allows_tooltip_preset()
+	return mcm_flag_enabled("TOOLTIP_PRESET")
+end
+
 local function inject_mag_type_block(result, obj)
-	if not mcm_allows_tooltip_block() then
-		return result
-	end
 	if not (sequential_load_magazine and sequential_load_magazine.get_mag_ammo_type_tooltip_block) then
 		return result
 	end
@@ -33,7 +36,15 @@ local function inject_mag_type_block(result, obj)
 	if not mag_data or #mag_data.loaded < 1 then
 		return result
 	end
-	local block = sequential_load_magazine.get_mag_ammo_type_tooltip_block(mag_data)
+	local block = ""
+	if mcm_allows_tooltip_block() then
+		block = sequential_load_magazine.get_mag_ammo_type_tooltip_block(mag_data) or ""
+	end
+	-- "Preset: A" line right after (or instead of) the type block.
+	if mcm_allows_tooltip_preset()
+		and sequential_load_magazine.get_mag_preset_tooltip_line then
+		block = block .. (sequential_load_magazine.get_mag_preset_tooltip_line(mag_data) or "")
+	end
 	if not block or block == "" then
 		return result
 	end

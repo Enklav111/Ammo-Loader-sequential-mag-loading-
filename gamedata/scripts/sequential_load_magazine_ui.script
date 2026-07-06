@@ -45,6 +45,22 @@ function UISequentialLoad:InitControls()
 	self.caliber_combo = self.xml:InitComboBox("main:caliber_combo", self.dialog)
 	self:Register(self.caliber_combo, "caliber_combo")
 
+	-- A/B slot tabs + active-slot status row
+	self.btn_slot_a = self.xml:Init3tButton("main:btn_slot_a", self.dialog)
+	self:Register(self.btn_slot_a, "btn_slot_a")
+
+	self.btn_slot_b = self.xml:Init3tButton("main:btn_slot_b", self.dialog)
+	self:Register(self.btn_slot_b, "btn_slot_b")
+
+	self.slot_status = self.xml:InitTextWnd("main:slot_status", self.dialog)
+	self.slot_active = self.xml:InitTextWnd("main:slot_active", self.dialog)
+
+	self.btn_make_active = self.xml:Init3tButton("main:btn_make_active", self.dialog)
+	self:Register(self.btn_make_active, "btn_make_active")
+
+	-- Slot being edited; synced to the caliber's active slot on selection.
+	self.current_slot = "A"
+
 	-- Preset rows live directly inside the ScrollView (one Static per row).
 	-- ScrollView lays them out vertically with vert_interval from XML and
 	-- forwards mouse clicks to inner widgets only when they are direct
@@ -79,6 +95,11 @@ end
 
 function UISequentialLoad:InitCallbacks()
 	self:AddCallback("caliber_combo", ui_events.LIST_ITEM_SELECT, self.OnCaliberSelect, self)
+	self:AddCallback("btn_slot_a", ui_events.BUTTON_CLICKED,
+		function() self:OnSlotClick("A") end, self)
+	self:AddCallback("btn_slot_b", ui_events.BUTTON_CLICKED,
+		function() self:OnSlotClick("B") end, self)
+	self:AddCallback("btn_make_active", ui_events.BUTTON_CLICKED, self.OnMakeActiveClick, self)
 	self:AddCallback("btn_add",    ui_events.BUTTON_CLICKED, self.OnAddClick,   self)
 	self:AddCallback("btn_save",   ui_events.BUTTON_CLICKED, self.OnSaveClick,  self)
 	self:AddCallback("btn_reset",  ui_events.BUTTON_CLICKED, self.OnResetClick, self)
@@ -178,6 +199,8 @@ function UISequentialLoad:PopulateCaliberCombo()
 	self.caliber_combo:enable_id(pick_idx)
 	self.caliber_combo:SetText(calibers[pick_idx])
 	self.current_caliber = calibers[pick_idx]
+	-- Open the tab the hotkey would use for this caliber.
+	self.current_slot = core.get_active_slot(self.current_caliber)
 	self:LoadPresetForCurrent()
 end
 
@@ -187,9 +210,10 @@ function UISequentialLoad:LoadPresetForCurrent()
 		self:RefreshRows()
 		self:RefreshAddCombo()
 		self:ResetPresetScrollPos()
+		self:RefreshSlotStatus()
 		return
 	end
-	local saved = core.get_preset(self.current_caliber)
+	local saved = core.get_preset_slot(self.current_caliber, self.current_slot or "A")
 	if saved and #saved > 0 then
 		-- deep copy so edits don't mutate stored preset before Save
 		self.working_preset = {}
@@ -209,6 +233,23 @@ function UISequentialLoad:LoadPresetForCurrent()
 	self:RefreshRows()
 	self:RefreshAddCombo()
 	self:ResetPresetScrollPos()
+	self:RefreshSlotStatus()
+end
+
+-- Slot status under the tabs: "Editing: A" on the left, "Active (hotkey): B"
+-- on the right (the active/default slot the hotkey and plain load use).
+function UISequentialLoad:RefreshSlotStatus()
+	if not (self.slot_status and self.slot_active) then return end
+	if not self.current_caliber then
+		self.slot_status:SetText("")
+		self.slot_active:SetText("")
+		return
+	end
+	local active = core.get_active_slot(self.current_caliber)
+	self.slot_status:SetText(string.format(
+		game.translate_string("st_seqload_slot_editing"), self.current_slot or "A"))
+	self.slot_active:SetText(string.format(
+		game.translate_string("st_seqload_slot_active"), active))
 end
 
 function UISequentialLoad:ResetPresetScrollPos()
@@ -265,8 +306,29 @@ function UISequentialLoad:OnCaliberSelect()
 	local cal = calibers[id]
 	if cal and cal ~= self.current_caliber then
 		self.current_caliber = cal
+		self.current_slot = core.get_active_slot(cal)
 		self:LoadPresetForCurrent()
 	end
+end
+
+-- Switch the edited slot (A/B tab). Unsaved edits are discarded, same as
+-- when switching calibers.
+function UISequentialLoad:OnSlotClick(slot)
+	if slot == self.current_slot then return end
+	self.current_slot = slot
+	self:LoadPresetForCurrent()
+end
+
+-- Make the edited slot the active one (used by the hotkey / plain load).
+function UISequentialLoad:OnMakeActiveClick()
+	if not self.current_caliber then return end
+	local slot = self.current_slot or "A"
+	core.set_active_slot(self.current_caliber, slot)
+	self:RefreshSlotStatus()
+	news_manager.send_tip(db.actor,
+		string.format(game.translate_string("st_seqload_active_switched"),
+			self.current_caliber, slot),
+		nil, "swiss_knife", 3000)
 end
 
 function UISequentialLoad:OnRowPlus(idx)
@@ -317,7 +379,7 @@ function UISequentialLoad:OnSaveClick()
 	for _, e in ipairs(self.working_preset) do
 		table.insert(clean, {ammo = e.ammo, count = e.count or 1})
 	end
-	core.save_preset(self.current_caliber, clean)
+	core.save_preset_slot(self.current_caliber, self.current_slot or "A", clean)
 	self.default_hint:Show(false)
 	news_manager.send_tip(db.actor, game.translate_string("st_seqload_saved"),
 		nil, "swiss_knife", 3000)
@@ -325,7 +387,7 @@ end
 
 function UISequentialLoad:OnResetClick()
 	if not self.current_caliber then return end
-	core.reset_preset(self.current_caliber)
+	core.reset_preset_slot(self.current_caliber, self.current_slot or "A")
 	news_manager.send_tip(db.actor, game.translate_string("st_seqload_reset_done"),
 		nil, "swiss_knife", 3000)
 	self:LoadPresetForCurrent()

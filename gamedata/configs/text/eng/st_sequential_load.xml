@@ -217,4 +217,86 @@
 		<text>Type:</text>
 	</string>
 
+	<!-- A/B presets -->
+
+	<string id="st_seqload_slot_a">
+		<text>Preset A</text>
+	</string>
+
+	<string id="st_seqload_slot_b">
+		<text>Preset B</text>
+	</string>
+
+	<string id="st_seqload_slot_editing">
+		<text>Editing: %s</text>
+	</string>
+
+	<string id="st_seqload_slot_active">
+		<text>Active (hotkey): %s</text>
+	</string>
+
+	<string id="st_seqload_make_active">
+		<text>Set as active</text>
+	</string>
+
+	<string id="st_seqload_active_switched">
+		<text>Active preset for %s: %s</text>
+	</string>
+
+	<string id="st_seqload_no_presets_to_switch">
+		<text>No saved presets for this caliber</text>
+	</string>
+
+	<string id="st_seqload_submenu_slot">
+		<text>Preset %s</text>
+	</string>
+
+	<string id="st_seqload_submenu_active">
+		<text> (active)</text>
+	</string>
+
+	<string id="st_seqload_tooltip_preset_header">
+		<text>Preset:</text>
+	</string>
+
+	<string id="ui_mcm_seqload_key_switch_preset">
+		<text>Preset switch key (A/B)</text>
+	</string>
+
+	<string id="ui_mcm_seqload_key_switch_preset_desc">
+		<text>With the inventory open and the cursor over a magazine: switches the active preset (A/B) for that magazine's caliber. The active preset is the one used by the load key and the plain context-menu load. Requires the modifier below (default Shift, i.e. Shift+U). Switching cancels any gradual load in progress for that caliber.</text>
+	</string>
+
+	<string id="ui_mcm_seqload_switch_preset_modifier">
+		<text>Preset switch: modifier</text>
+	</string>
+
+	<string id="ui_mcm_seqload_switch_preset_modifier_desc">
+		<text>Which key must be held together with the preset switch key. Default Shift. If set to &quot;no modifier&quot; while the switch key equals the load key, loading takes priority and switching is unavailable - pick a different key or a modifier.</text>
+	</string>
+
+	<string id="seqload_switch_preset_modifier_lst_seqload_mod_none">
+		<text>No modifier (switch key only)</text>
+	</string>
+
+	<string id="seqload_switch_preset_modifier_lst_seqload_mod_shift">
+		<text>Hold Shift</text>
+	</string>
+
+	<string id="seqload_switch_preset_modifier_lst_seqload_mod_ctrl">
+		<text>Hold Ctrl</text>
+	</string>
+
+	<string id="seqload_switch_preset_modifier_lst_seqload_mod_alt">
+		<text>Hold Alt</text>
+	</string>
+
+	<string id="ui_mcm_seqload_tooltip_preset">
+		<text>Magazine tooltip: last preset</text>
+	</string>
+
+	<string id="ui_mcm_seqload_tooltip_preset_desc">
+		<text>If enabled, the magazine tooltip shows a &quot;Preset:&quot; line with the saved preset (A or B) the magazine was last sequentially loaded with. Loads using the default alphabetical order clear the mark. Enabled by default.</text>
+	</string>
+
 </string_table>
