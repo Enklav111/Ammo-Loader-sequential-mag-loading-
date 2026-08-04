@@ -60,8 +60,12 @@ local function on_pick(mag_id, slot)
 	sequential_load_magazine.perform_sequential_load(mag, slot)
 end
 
-local function slot_row_label(slot, is_active)
-	local label = string.format(gc("st_seqload_submenu_slot"), slot)
+-- caliber is passed so the row can show the user's slot name:
+-- 'Preset A "buck" (active)'.
+local function slot_row_label(caliber, slot, is_active)
+	local core = sequential_load_magazine
+	local display = (core and core.slot_label and core.slot_label(caliber, slot)) or slot
+	local label = string.format(gc("st_seqload_submenu_slot"), display)
 	if is_active then
 		label = label .. gc("st_seqload_submenu_active")
 	end
@@ -95,7 +99,7 @@ function show_for_mag(mag)
 
 	for _, slot in ipairs({ "A", "B" }) do
 		if core.has_preset_slot(caliber, slot) then
-			add_row(slot_row_label(slot, active == slot), slot)
+			add_row(slot_row_label(caliber, slot, active == slot), slot)
 		end
 	end
 

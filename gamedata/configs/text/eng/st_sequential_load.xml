@@ -239,6 +239,18 @@
 		<text>Set as active</text>
 	</string>
 
+	<string id="st_seqload_rename_label">
+		<text>Name:</text>
+	</string>
+
+	<string id="st_seqload_rename_btn">
+		<text>Rename</text>
+	</string>
+
+	<string id="st_seqload_renamed">
+		<text>Preset %s name saved</text>
+	</string>
+
 	<string id="st_seqload_active_switched">
 		<text>Active preset for %s: %s</text>
 	</string>
@@ -264,7 +276,7 @@
 	</string>
 
 	<string id="ui_mcm_seqload_key_switch_preset_desc">
-		<text>With the inventory open and the cursor over a magazine: switches the active preset (A/B) for that magazine's caliber. The active preset is the one used by the load key and the plain context-menu load. Requires the modifier below (default Shift, i.e. Shift+U). Switching cancels any gradual load in progress for that caliber.</text>
+		<text>Switches the active preset (A/B). Two contexts: with the inventory open and the cursor over a magazine - for that magazine's caliber; with no GUI open and a weapon in hands (including pump shotguns, bolt rifles and revolvers) - for that weapon's caliber. The active preset is the one used by the load key, the plain context-menu load and shell-by-shell reloads. Requires the modifier below (default Shift, i.e. Shift+U). Switching cancels any gradual load in progress for that caliber.</text>
 	</string>
 
 	<string id="ui_mcm_seqload_switch_preset_modifier">

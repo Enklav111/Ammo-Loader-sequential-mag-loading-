@@ -743,12 +743,18 @@ local function ensure_state(wpn, info)
 	else
 		s.caliber = s.caliber or info.caliber
 		s.cycle_pos = s.cycle_pos or 1
-		if mr_loaded and s.stack ~= mr_loaded then
-			s.stack = mr_loaded
-			s.mr_managed = true
-			s.ammo_synced = false
-			dbg("rebound to Mags Redux loaded for id=%d", id)
-		elseif not mr_loaded and s.mr_managed then
+		if mr_loaded then
+			if not s.mr_managed then
+				s.stack = mr_loaded
+				s.mr_managed = true
+				s.ammo_synced = false
+				dbg("rebound to Mags Redux loaded for id=%d", id)
+			elseif s.stack ~= mr_loaded then
+				-- Mags Redux may replace the loaded table reference each
+				-- poll; alias silently without resetting sync state.
+				s.stack = mr_loaded
+			end
+		elseif s.mr_managed then
 			s.stack = {}
 			s.mr_managed = false
 			s.ammo_synced = false

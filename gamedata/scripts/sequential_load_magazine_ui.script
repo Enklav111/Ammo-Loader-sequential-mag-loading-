@@ -58,6 +58,15 @@ function UISequentialLoad:InitControls()
 	self.btn_make_active = self.xml:Init3tButton("main:btn_make_active", self.dialog)
 	self:Register(self.btn_make_active, "btn_make_active")
 
+	-- Rename row: user label for the edited slot, shown in messages,
+	-- the tooltip "Preset:" line and the submenu rows.
+	self.xml:InitTextWnd("main:rename_label", self.dialog)
+	self.name_edit = self.xml:InitEditBox("main:name_edit", self.dialog)
+	self:Register(self.name_edit, "name_edit")
+
+	self.btn_rename = self.xml:Init3tButton("main:btn_rename", self.dialog)
+	self:Register(self.btn_rename, "btn_rename")
+
 	-- Slot being edited; synced to the caliber's active slot on selection.
 	self.current_slot = "A"
 
@@ -100,6 +109,7 @@ function UISequentialLoad:InitCallbacks()
 	self:AddCallback("btn_slot_b", ui_events.BUTTON_CLICKED,
 		function() self:OnSlotClick("B") end, self)
 	self:AddCallback("btn_make_active", ui_events.BUTTON_CLICKED, self.OnMakeActiveClick, self)
+	self:AddCallback("btn_rename", ui_events.BUTTON_CLICKED, self.OnRenameClick, self)
 	self:AddCallback("btn_add",    ui_events.BUTTON_CLICKED, self.OnAddClick,   self)
 	self:AddCallback("btn_save",   ui_events.BUTTON_CLICKED, self.OnSaveClick,  self)
 	self:AddCallback("btn_reset",  ui_events.BUTTON_CLICKED, self.OnResetClick, self)
@@ -243,13 +253,20 @@ function UISequentialLoad:RefreshSlotStatus()
 	if not self.current_caliber then
 		self.slot_status:SetText("")
 		self.slot_active:SetText("")
+		if self.name_edit then self.name_edit:SetText("") end
 		return
 	end
+	local slot = self.current_slot or "A"
 	local active = core.get_active_slot(self.current_caliber)
 	self.slot_status:SetText(string.format(
-		game.translate_string("st_seqload_slot_editing"), self.current_slot or "A"))
+		game.translate_string("st_seqload_slot_editing"),
+		core.slot_label(self.current_caliber, slot)))
 	self.slot_active:SetText(string.format(
-		game.translate_string("st_seqload_slot_active"), active))
+		game.translate_string("st_seqload_slot_active"),
+		core.slot_label(self.current_caliber, active)))
+	if self.name_edit then
+		self.name_edit:SetText(core.get_slot_name(self.current_caliber, slot) or "")
+	end
 end
 
 function UISequentialLoad:ResetPresetScrollPos()
@@ -327,7 +344,21 @@ function UISequentialLoad:OnMakeActiveClick()
 	self:RefreshSlotStatus()
 	news_manager.send_tip(db.actor,
 		string.format(game.translate_string("st_seqload_active_switched"),
-			self.current_caliber, slot),
+			self.current_caliber, core.slot_label(self.current_caliber, slot)),
+		nil, "swiss_knife", 3000)
+end
+
+-- Save the user label typed in the rename box for the edited slot.
+-- An empty box clears the label back to the plain "A" / "B".
+function UISequentialLoad:OnRenameClick()
+	if not self.current_caliber then return end
+	local slot = self.current_slot or "A"
+	local txt = self.name_edit and self.name_edit:GetText() or ""
+	core.set_slot_name(self.current_caliber, slot, txt)
+	self:RefreshSlotStatus()
+	news_manager.send_tip(db.actor,
+		string.format(game.translate_string("st_seqload_renamed"),
+			core.slot_label(self.current_caliber, slot)),
 		nil, "swiss_knife", 3000)
 end
 

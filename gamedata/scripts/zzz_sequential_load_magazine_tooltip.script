@@ -41,9 +41,11 @@ local function inject_mag_type_block(result, obj)
 		block = sequential_load_magazine.get_mag_ammo_type_tooltip_block(mag_data) or ""
 	end
 	-- "Preset: A" line right after (or instead of) the type block.
+	-- `obj` lets the core resolve the caliber and append the user's
+	-- slot name: 'Preset: A "buck"'.
 	if mcm_allows_tooltip_preset()
 		and sequential_load_magazine.get_mag_preset_tooltip_line then
-		block = block .. (sequential_load_magazine.get_mag_preset_tooltip_line(mag_data) or "")
+		block = block .. (sequential_load_magazine.get_mag_preset_tooltip_line(mag_data, obj) or "")
 	end
 	if not block or block == "" then
 		return result

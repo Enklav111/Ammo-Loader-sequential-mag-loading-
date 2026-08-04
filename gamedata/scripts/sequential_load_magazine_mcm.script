@@ -23,9 +23,14 @@
 --                          a successful load (default: true). Status
 --                          tips ("no ammo", "interrupted") are unaffected.
 --   KEY_SWITCH           - DIK code for the preset A/B switch hotkey
---                          (default DIK_U); works with the cursor over
---                          a magazine in the inventory. Requires the
---                          SWITCH_MODIFIER chord (default Shift+U).
+--                          (default DIK_U). Works in two contexts:
+--                            * cursor over a magazine in the inventory
+--                              -> switch that magazine's caliber;
+--                            * no GUI open + weapon in hands (incl.
+--                              pump shotguns / bolt rifles / revolvers)
+--                              -> switch the weapon's caliber.
+--                          Requires the SWITCH_MODIFIER chord
+--                          (default Shift+U).
 --   SWITCH_MODIFIER      - 0=none, 1=Shift, 2=Ctrl, 3=Alt for KEY_SWITCH.
 --                          When 0 and KEY_SWITCH == KEY_TOGGLE, loading
 --                          wins and switching is unreachable (misconfig).
@@ -199,9 +204,11 @@ end
 local function load_settings()
 	KEY_TOGGLE    = get_mcm_value("seqload/key_toggle",            DIK_keys.DIK_U)
 	KEY_DUMP      = get_mcm_value("seqload/key_dump",              339)
-	DUMP_MODIFIER = get_mcm_value("seqload/dump_weapon_modifier",  1)
+	-- tonumber(): some MCM builds hand radio values back as strings,
+	-- which would silently break the == comparisons in mod_held().
+	DUMP_MODIFIER = tonumber(get_mcm_value("seqload/dump_weapon_modifier",  1)) or 1
 	KEY_SWITCH    = get_mcm_value("seqload/key_switch_preset",     DIK_keys.DIK_U)
-	SWITCH_MODIFIER = get_mcm_value("seqload/switch_preset_modifier", 1)
+	SWITCH_MODIFIER = tonumber(get_mcm_value("seqload/switch_preset_modifier", 1)) or 1
 	local dbg     = get_mcm_value("seqload/debug",                 false)
 	DEBUG         = (dbg == true) or (dbg == 1)
 	INSTANT_LOAD  = get_mcm_value("seqload/instant_load",          false)
@@ -228,6 +235,37 @@ end
 --------------------------------------------------------------------
 -- Helpers
 --------------------------------------------------------------------
+
+-- Same bag filter as MENU_BAGS in sequential_load_magazine.script:
+-- in loot/repair only the actor's own grids are valid targets.
+local ACTOR_BAGS = {actor_bag = true, actor_equ = true, actor_belt = true}
+
+local function safe_call(fn, ...)
+	local ok, a, b, c = pcall(fn, ...)
+	if not ok then return nil end
+	return a, b, c
+end
+
+local function safe_obj_id(obj)
+	if not obj then return nil end
+	return safe_call(function() return obj:id() end)
+end
+
+local function safe_live_obj(obj_or_id)
+	local id = type(obj_or_id) == "number" and obj_or_id or safe_obj_id(obj_or_id)
+	if not id then return nil end
+	return safe_call(function() return level.object_by_id(id) end)
+end
+
+local function is_actor_bag(bag)
+	return bag and ACTOR_BAGS[bag] == true
+end
+
+local function is_actor_inventory_mode()
+	if not (ui_inventory and ui_inventory.GUI) then return false end
+	local m = ui_inventory.GUI.mode
+	return m == "loot" or m == "repair"
+end
 
 local function any_gui_open()
 	if not _GUIs then return false end
@@ -261,9 +299,16 @@ end
 local function on_item_focus_lost(obj)
 	-- Clear only if we're losing focus on the same obj we cached;
 	-- otherwise we could wipe a fresh focus that already replaced us.
-	if hovered_obj and obj and hovered_obj:id() == obj:id() then
+	if not hovered_obj then return end
+	if not obj then
 		hovered_obj = nil
-	elseif not obj then
+		return
+	end
+	local cached_id = safe_obj_id(hovered_obj)
+	local lost_id = safe_obj_id(obj)
+	if cached_id and lost_id and cached_id == lost_id then
+		hovered_obj = nil
+	elseif not cached_id then
 		hovered_obj = nil
 	end
 end
@@ -275,18 +320,33 @@ local function on_gui_hide(name, path)
 	hovered_obj = nil
 end
 
+-- Is the given DIK currently held? key_state() return value differs
+-- between engine builds: modded exes return 0/1, older/vanilla builds
+-- return the raw DirectInput byte (0x80) and it may become a boolean
+-- in the future. Treat anything except nil/false/0 as "held" (same
+-- defensive pattern MCM itself uses in update_modifier_key_states).
+local function dik_held(dik)
+	local s = key_state(dik)
+	return s ~= nil and s ~= false and s ~= 0
+end
+
 -- Is the given kb_mod value (0=none, 1=Shift, 2=Ctrl, 3=Alt) held right now?
 -- Value 0 means "no requirement" and always matches.
 local function mod_held(m)
 	if m == 0 then
 		return true
 	end
+	-- Prefer MCM's own helper when present: it already papers over the
+	-- key_state() quirks above and is kept in sync with the engine.
+	if ui_mcm and ui_mcm.get_mod_key then
+		return ui_mcm.get_mod_key(m) == true
+	end
 	if m == 1 then
-		return key_state(DIK_keys.DIK_LSHIFT) == 1 or key_state(DIK_keys.DIK_RSHIFT) == 1
+		return dik_held(DIK_keys.DIK_LSHIFT) or dik_held(DIK_keys.DIK_RSHIFT)
 	elseif m == 2 then
-		return key_state(DIK_keys.DIK_LCONTROL) == 1 or key_state(DIK_keys.DIK_RCONTROL) == 1
+		return dik_held(DIK_keys.DIK_LCONTROL) or dik_held(DIK_keys.DIK_RCONTROL)
 	elseif m == 3 then
-		return key_state(DIK_keys.DIK_LMENU) == 1 or key_state(DIK_keys.DIK_RMENU) == 1
+		return dik_held(DIK_keys.DIK_LMENU) or dik_held(DIK_keys.DIK_RMENU)
 	end
 	return false
 end
@@ -335,7 +395,9 @@ local inv_kb_chain = nil
 -- direct hover read covers those, with extra nil-guards (hover.bag can
 -- be `false`/nil while idx is set in some forks).
 local function resolve_hovered_obj()
-	if hovered_obj then return hovered_obj end
+	if hovered_obj then
+		return safe_live_obj(hovered_obj)
+	end
 	if not (ui_inventory and ui_inventory.GUI and ui_inventory.GUI.CC) then
 		return nil
 	end
@@ -344,9 +406,13 @@ local function resolve_hovered_obj()
 	local bag = hov.bag
 	local idx = hov.idx
 	if not (bag and idx) then return nil end
+	if is_actor_inventory_mode() and not is_actor_bag(bag) then
+		return nil
+	end
 	local cc = ui_inventory.GUI.CC[bag]
 	if not cc then return nil end
-	return cc:GetObj(idx)
+	local obj = safe_call(function() return cc:GetObj(idx) end)
+	return safe_live_obj(obj)
 end
 
 -- Resolved object IF it is a magazine in the actor's own inventory.
@@ -354,29 +420,22 @@ local function get_hovered_actor_mag()
 	if not (magazine_binder and magazine_binder.is_magazine) then
 		return nil
 	end
-	local obj = resolve_hovered_obj()
-	if not obj then return nil end
-	-- The cached focus object can outlive the item it points to (consumed,
-	-- moved, sold, ...). Calling :section() on a destroyed object crashes
-	-- the game, so re-fetch a live object by id first. obj:id() is safe on
-	-- a destroyed object; level.object_by_id returns nil once it's gone.
-	local ok_id, id = pcall(function() return obj:id() end)
-	if not ok_id or not id then
+	local ok, mag = pcall(function()
+		local obj = resolve_hovered_obj()
+		if not obj then return nil end
+		if not magazine_binder.is_magazine(obj) then return nil end
+		local p = obj:parent()
+		if not p or p:id() ~= AC_ID then return nil end
+		return obj
+	end)
+	if not ok or not mag then
 		hovered_obj = nil
 		return nil
 	end
-	obj = level.object_by_id(id)
-	if not obj then
-		hovered_obj = nil
-		return nil
-	end
-	if not magazine_binder.is_magazine(obj) then return nil end
-	local p = obj:parent()
-	if not p or p:id() ~= AC_ID then return nil end
-	return obj
+	return mag
 end
 
-local function inv_handle_keys(dik)
+local function inv_handle_keys_impl(dik)
 	-- same modes as Mags Unload: inventory + loot; add repair
 	-- (GAMMA can open a repair screen that still uses the bag grid).
 	if not (ui_inventory and ui_inventory.GUI) then
@@ -402,6 +461,13 @@ local function inv_handle_keys(dik)
 		sequential_load_magazine.perform_sequential_load(mag)
 	elseif DEBUG and dik == KEY_DUMP and sequential_load_magazine and sequential_load_magazine.dump_mag_order then
 		sequential_load_magazine.dump_mag_order(mag)
+	end
+end
+
+local function inv_handle_keys(dik)
+	local ok = pcall(inv_handle_keys_impl, dik)
+	if not ok then
+		hovered_obj = nil
 	end
 end
 
@@ -510,16 +576,33 @@ local function handle_key_dump()
 	end
 end
 
--- Preset switch via the global key path (inventory open but the window
--- not consuming keys). Returns true when the press was consumed.
+-- Preset switch via the global key path. Two contexts:
+--   * inventory open (but the window not consuming keys) + cursor on a
+--     magazine -> switch that magazine's caliber, as before;
+--   * no GUI at all + a weapon in hands -> switch the weapon's caliber.
+--     This is how pump shotguns, bolt rifles and revolvers (weapons
+--     loaded shell-by-shell, no detachable magazine item to hover)
+--     get their preset switched.
+-- Returns true when the press was consumed.
 local function handle_key_switch(key)
 	if not is_switch_press(key) then return false end
-	if not inventory_open() then return false end
-	local mag = get_hovered_actor_mag()
-	if not mag then return false end
-	if sequential_load_magazine and sequential_load_magazine.switch_preset_for_mag then
-		sequential_load_magazine.switch_preset_for_mag(mag)
+	if inventory_open() then
+		local mag = get_hovered_actor_mag()
+		if not mag then return false end
+		if sequential_load_magazine and sequential_load_magazine.switch_preset_for_mag then
+			sequential_load_magazine.switch_preset_for_mag(mag)
+		end
+		return true
 	end
+	if any_gui_open() then return false end
+	local wpn = db.actor and db.actor:active_item()
+	if not wpn then return false end
+	if not (sequential_load_magazine and sequential_load_magazine.switch_preset_for_weapon) then
+		return false
+	end
+	-- Consume the press whether the switch happened or was refused with
+	-- a tip - either way the user targeted the switch chord.
+	sequential_load_magazine.switch_preset_for_weapon(wpn)
 	return true
 end
 

@@ -24,6 +24,7 @@
 --       A      = { {ammo = "ammo_...", count = 3}, ... } | nil,
 --       B      = { ... } | nil,
 --       active = "A" | "B",   -- slot used by the hotkey / plain load
+--       names  = { A = "buck", B = "slugs" } | nil,  -- optional user labels
 --   }
 -- v1 shape (plain array) is migrated transparently in load_state /
 -- slot_entry so old saves keep their preset as slot A.
@@ -39,7 +40,7 @@ local SLOT_B = "B"
 -- v1 -> v2 entry migration. An old entry is a plain array of rows.
 local function migrate_entry(e)
 	if type(e) ~= "table" then return nil end
-	if e.A or e.B or e.active then return e end
+	if e.A or e.B or e.active or e.names then return e end
 	if #e > 0 then
 		return { A = e, active = SLOT_A }
 	end
@@ -97,6 +98,54 @@ function get_active_slot(caliber)
 	return (e and e.active) or SLOT_A
 end
 
+--------------------------------------------------------------------
+-- Slot names (user "приписка" shown in UI and messages) ------------
+--------------------------------------------------------------------
+
+-- Hard cap so labels always fit tips / status rows / tooltips.
+local MAX_SLOT_NAME_LEN = 16
+
+function get_slot_name(caliber, slot)
+	if not valid_slot(slot) then return nil end
+	local e = slot_entry(caliber)
+	local n = e and e.names and e.names[slot]
+	if n and n ~= "" then return n end
+	return nil
+end
+
+-- Set (or clear with nil/"") the user label of a slot. Whitespace is
+-- trimmed and the result truncated to MAX_SLOT_NAME_LEN characters.
+function set_slot_name(caliber, slot, name)
+	if not caliber or not valid_slot(slot) then return false end
+	if name then
+		name = tostring(name):gsub("^%s+", ""):gsub("%s+$", "")
+		if #name > MAX_SLOT_NAME_LEN then
+			name = string.sub(name, 1, MAX_SLOT_NAME_LEN)
+		end
+		if name == "" then name = nil end
+	end
+	local e = slot_entry(caliber, true)
+	e.names = e.names or {}
+	e.names[slot] = name
+	if not (e.names.A or e.names.B) then
+		e.names = nil
+	end
+	if not (e.A or e.B or e.names) then
+		presets[caliber] = nil
+	end
+	return true
+end
+
+-- Display label for a slot: 'A' or 'A "name"'. Used by every message,
+-- the submenu rows, the tooltip line and the overlay status rows.
+function slot_label(caliber, slot)
+	local name = get_slot_name(caliber, slot)
+	if name then
+		return string.format("%s \"%s\"", slot, name)
+	end
+	return slot
+end
+
 -- Forward declaration; defined in the gradual-load section below.
 local cancel_loads_for_caliber
 
@@ -132,7 +181,9 @@ function save_preset_slot(caliber, slot, preset)
 	else
 		e[slot] = nil
 	end
-	if not (e.A or e.B) then
+	-- Keep the entry alive while anything user-made remains (a preset in
+	-- the other slot or a custom slot name).
+	if not (e.A or e.B or e.names) then
 		presets[caliber] = nil
 	end
 end
@@ -987,8 +1038,7 @@ end
 -- Returns true when the switch happened (caller may play a sound).
 --------------------------------------------------------------------
 
-function switch_preset_for_mag(mag)
-	local caliber = get_mag_caliber(mag)
+function switch_preset_for_caliber(caliber)
 	if not caliber then return false end
 	local new_slot = toggle_active_slot(caliber)
 	if not new_slot then
@@ -999,9 +1049,33 @@ function switch_preset_for_mag(mag)
 	end
 	news_manager.send_tip(db.actor,
 		string.format(game.translate_string("st_seqload_active_switched"),
-			caliber, new_slot),
+			caliber, slot_label(caliber, new_slot)),
 		nil, "swiss_knife", 3000)
 	return true
+end
+
+function switch_preset_for_mag(mag)
+	return switch_preset_for_caliber(get_mag_caliber(mag))
+end
+
+-- Caliber token for a weapon in hands (pump shotguns, bolt rifles,
+-- revolvers, but also any magazine-fed weapon): first ammo_class entry,
+-- with caliber aliases applied - the same key the preset UI uses.
+function get_weapon_caliber(wpn)
+	if not wpn then return nil end
+	local ok, sec = pcall(function() return wpn:section() end)
+	if not ok or not sec then return nil end
+	local ammo_class = SYS_GetParam(0, sec, "ammo_class")
+	if not ammo_class or ammo_class == "" then return nil end
+	local first = string.match(ammo_class, "([^,%s]+)")
+	if not first then return nil end
+	return extract_caliber(first)
+end
+
+-- Active-slot switch for the weapon currently in hands (Shift+U with no
+-- GUI open). Returns true when a switch (or its refusal tip) happened.
+function switch_preset_for_weapon(wpn)
+	return switch_preset_for_caliber(get_weapon_caliber(wpn))
 end
 
 --------------------------------------------------------------------
@@ -1196,7 +1270,9 @@ end
 -- One tooltip line "Preset: A" - which saved slot this magazine was last
 -- loaded with. Nil when the mag was never sequentially loaded from a
 -- saved slot (default alphabetical loads clear the mark).
-function get_mag_preset_tooltip_line(mag_data)
+-- Optional `obj` (the magazine) lets us resolve the caliber and append
+-- the user's slot name: 'Preset: A "buck"'.
+function get_mag_preset_tooltip_line(mag_data, obj)
 	local slot = mag_data and mag_data.seqload_preset
 	if slot ~= "A" and slot ~= "B" then
 		return nil
@@ -1209,8 +1285,13 @@ function get_mag_preset_tooltip_line(mag_data)
 	if not (clr_g and clr_2) then
 		return nil
 	end
+	local label = slot
+	if obj then
+		local cal = get_mag_caliber(obj)
+		if cal then label = slot_label(cal, slot) end
+	end
 	local hdr = game.translate_string("st_seqload_tooltip_preset_header")
-	return clr_2 .. hdr .. " " .. clr_g .. slot .. clr_2 .. " \\n"
+	return clr_2 .. hdr .. " " .. clr_g .. label .. clr_2 .. " \\n"
 end
 
 --------------------------------------------------------------------
